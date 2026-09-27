@@ -13,14 +13,18 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use stream_model::{
-    normalize_whitespace, slug, Change, ChangeKind, ContextEntry, ContextId, EvidenceLocator, Item, ItemId,
-    SignalId, Subject, Topic,
+    normalize_whitespace, slug, Change, ChangeKind, ClaimBasis, ContextEntry, ContextId, EvidenceLocator, Item,
+    ItemId, SignalId, Subject, Topic,
 };
 
 mod heuristic;
+mod model;
+pub mod provider;
 mod text;
 
 pub use heuristic::HeuristicInterpreter;
+pub use model::{interpretation_schema, parse_interpretation, ModelInterpreter};
+pub use provider::{ModelError, ModelProvider, ModelRequest, OpenAiCompatibleProvider, ProviderConfig};
 pub use text::{key_terms, sentences, stem};
 
 /// An earlier item Stream already understands, offered as connection candidates.
@@ -72,15 +76,48 @@ pub enum LinkKind {
     Related,
 }
 
+/// Whether a linked observation supports or disputes the earlier one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stance {
+    #[default]
+    Supports,
+    Contradicts,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ItemLink {
     pub item_id: ItemId,
     pub kind: LinkKind,
+    #[serde(default)]
+    pub stance: Stance,
     pub strength: f32,
     pub shared_terms: Vec<String>,
     pub excerpts: Vec<Excerpt>,
     pub rationale: String,
 }
+
+/// A proposition with an explicit basis. Only `Observed` claims assert what
+/// a source says; inferred, connected, and hypothetical claims are Stream's
+/// reasoning and are always labelled as such.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProposedClaim {
+    pub basis: ClaimBasis,
+    pub statement: String,
+    #[serde(default)]
+    pub excerpts: Vec<Excerpt>,
+    #[serde(default)]
+    pub context_ids: Vec<ContextId>,
+    #[serde(default)]
+    pub item_ids: Vec<ItemId>,
+    #[serde(default)]
+    pub rationale: String,
+    #[serde(default)]
+    pub confidence: f32,
+}
+
+/// Upper bound on claims kept per interpretation: density, not volume.
+pub const MAX_CLAIMS: usize = 12;
 
 /// An advisory proposal. Nothing here is authoritative until verified and
 /// persisted through the normal Stream/FeltDB path.
@@ -92,6 +129,8 @@ pub struct Interpretation {
     pub context_matches: Vec<ContextMatch>,
     pub why_it_matters: Option<Claim<String>>,
     pub item_links: Vec<ItemLink>,
+    #[serde(default)]
+    pub claims: Vec<ProposedClaim>,
 }
 
 /// A replaceable semantic provider. Presentation layers never learn which
@@ -241,6 +280,62 @@ pub fn verify(
             Some(link)
         })
         .collect();
+
+    let mut kept = Vec::new();
+    for mut claim in std::mem::take(&mut out.claims) {
+        claim.statement = normalize_whitespace(&claim.statement);
+        let label = format!("claim:{}", claim.basis);
+        let refuse = |reason: &str, rejections: &mut Vec<Rejection>| {
+            rejections.push(Rejection { claim: label.clone(), reason: reason.into() })
+        };
+        if claim.statement.is_empty() || claim.statement.len() > 600 {
+            refuse("statement must be non-empty and concise", &mut rejections);
+            continue;
+        }
+        claim.excerpts = grounded(item, &claim.excerpts);
+        let known_contexts = claim.context_ids.len();
+        claim.context_ids.retain(|id| contexts.iter().any(|context| &context.id == id));
+        let known_items = claim.item_ids.len();
+        claim.item_ids.retain(|id| prior.iter().any(|candidate| &candidate.item_id == id));
+        if claim.context_ids.len() != known_contexts || claim.item_ids.len() != known_items {
+            // Unknown references are dropped, never trusted.
+            rejections.push(Rejection { claim: label.clone(), reason: "dropped references Stream does not know".into() });
+        }
+        claim.confidence = claim.confidence.clamp(0.0, 1.0);
+        let valid = match claim.basis {
+            ClaimBasis::Observed | ClaimBasis::Inferred => {
+                if claim.excerpts.is_empty() {
+                    refuse("no quote is present in the underlying item", &mut rejections);
+                    false
+                } else {
+                    true
+                }
+            }
+            ClaimBasis::Connected => {
+                if claim.context_ids.is_empty() && claim.item_ids.is_empty() {
+                    refuse("a connection must name a known context or prior item", &mut rejections);
+                    false
+                } else if claim.excerpts.is_empty() && claim.rationale.trim().len() < 12 {
+                    refuse("a connection needs a grounded quote or an explicit explanation", &mut rejections);
+                    false
+                } else {
+                    true
+                }
+            }
+            ClaimBasis::Hypothesis => {
+                if claim.rationale.trim().is_empty() {
+                    refuse("a hypothesis must explain why it is worth investigating", &mut rejections);
+                    false
+                } else {
+                    true
+                }
+            }
+        };
+        if valid && kept.len() < MAX_CLAIMS {
+            kept.push(claim);
+        }
+    }
+    out.claims = kept;
 
     Ok(Verified { interpretation: out, rejections })
 }

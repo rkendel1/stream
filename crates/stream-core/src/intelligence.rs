@@ -18,14 +18,16 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use stream_ingest::detect_format;
 use stream_model::{
-    canonicalize_url, slug, ClaimKind, Connection, ConnectionId, ConnectionRelation,
+    canonicalize_url, slug, ClaimId, ClaimKind, Insight, InsightStatus, IntelligenceEvent, IntelligenceEventId,
+    SignalClaim, Synthesis, Connection, ConnectionId, ConnectionRelation,
     ConnectionTargetKind, ContextEntry, ContextId, ContextKind, Evidence, EvidenceId, EvidenceLocator, FailureCategory,
     FetchAttempt, FetchStatus, Item, ItemId, ItemRelation, ItemRelationId, NormalizedItem, ProcessingStage,
     Provenance, ProvenanceId, RelationKind, RuleAction, SemanticDecisionId, Signal, SignalId, SignalStatus, Source,
     SourceId, SourceKind, SourceStatus, Subject, Topic,
 };
 use stream_rules::ranking::{explain_rank, RankingExplanation, RankingInput};
-use stream_semantic::{verify, Excerpt, InterpretationInput, LinkKind, PriorItem, Rejection, Verified};
+use stream_reason::{verify_synthesis, Observation, ObservationEvidence, SynthesisInput};
+use stream_semantic::{verify, Excerpt, InterpretationInput, LinkKind, PriorItem, ProposedClaim, Rejection, Stance, Verified};
 use url::Url;
 
 /// Newest feed entries considered per observation. Stream observes change;
@@ -63,6 +65,9 @@ pub struct ObservationReport {
     pub signals_corroborated: Vec<SignalId>,
     pub understood_without_signal: Vec<ItemId>,
     pub rejected: Vec<RejectedInterpretation>,
+    /// Plain-language notes about degraded intelligence (no provider details).
+    #[serde(default)]
+    pub notices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -165,6 +170,7 @@ pub struct SignalSummary {
     pub source_count: usize,
     pub observation_count: usize,
     pub evidence_count: usize,
+    pub contradiction_count: usize,
     pub primary: Option<ItemRef>,
     pub last_observed_at: DateTime<Utc>,
     pub ranking: RankingExplanation,
@@ -185,6 +191,38 @@ pub struct SignalDetail {
     pub evidence: Vec<EvidenceTrace>,
     pub connections: Vec<Connection>,
     pub observations: Vec<ItemRef>,
+    /// Labelled claims: observed, connected, inferred, hypothesis.
+    pub claims: Vec<SignalClaim>,
+    /// Cross-source synthesis, when the change has several observations.
+    pub synthesis: Option<SynthesisView>,
+    /// Saved reasoning about this signal.
+    pub insights: Vec<Insight>,
+}
+
+/// A synthesis as presentation layers see it (without generator metadata).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SynthesisView {
+    pub agreements: Vec<stream_model::SynthesisPoint>,
+    pub new_information: Vec<stream_model::SynthesisPoint>,
+    pub differences: Vec<stream_model::SynthesisPoint>,
+    pub uncertainties: Vec<stream_model::SynthesisPoint>,
+    pub source_count: usize,
+    pub observation_count: usize,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&Synthesis> for SynthesisView {
+    fn from(s: &Synthesis) -> Self {
+        Self {
+            agreements: s.agreements.clone(),
+            new_information: s.new_information.clone(),
+            differences: s.differences.clone(),
+            uncertainties: s.uncertainties.clone(),
+            source_count: s.source_count,
+            observation_count: s.observation_count,
+            updated_at: s.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,23 +281,27 @@ pub struct SourceDetail {
 }
 
 /// Everything needed to present signals, loaded once from FeltDB.
-struct Snapshot {
-    signals: Vec<Signal>,
-    evidence: Vec<Evidence>,
-    connections: Vec<Connection>,
-    contexts: Vec<ContextEntry>,
-    items: HashMap<ItemId, Item>,
-    sources: HashMap<SourceId, Source>,
-    provenance: HashMap<ProvenanceId, Provenance>,
-    rule_hits: HashMap<ItemId, Vec<String>>,
+pub(crate) struct Snapshot {
+    pub(crate) signals: Vec<Signal>,
+    pub(crate) evidence: Vec<Evidence>,
+    pub(crate) connections: Vec<Connection>,
+    pub(crate) contexts: Vec<ContextEntry>,
+    pub(crate) items: HashMap<ItemId, Item>,
+    pub(crate) sources: HashMap<SourceId, Source>,
+    pub(crate) provenance: HashMap<ProvenanceId, Provenance>,
+    pub(crate) rule_hits: HashMap<ItemId, Vec<String>>,
+    pub(crate) claims: Vec<SignalClaim>,
+    pub(crate) syntheses: HashMap<SignalId, Synthesis>,
+    pub(crate) insights: Vec<Insight>,
+    pub(crate) item_relations: Vec<ItemRelation>,
 }
 
 impl Snapshot {
-    fn source_ref(&self, id: &SourceId) -> Option<SourceRef> {
+    pub(crate) fn source_ref(&self, id: &SourceId) -> Option<SourceRef> {
         self.sources.get(id).map(SourceRef::from)
     }
 
-    fn item_ref(&self, id: &ItemId) -> Option<ItemRef> {
+    pub(crate) fn item_ref(&self, id: &ItemId) -> Option<ItemRef> {
         let item = self.items.get(id)?;
         Some(ItemRef {
             id: item.id.clone(),
@@ -271,17 +313,17 @@ impl Snapshot {
         })
     }
 
-    fn evidence_for<'a>(&'a self, signal: &'a SignalId) -> impl Iterator<Item = &'a Evidence> + 'a {
+    pub(crate) fn evidence_for<'a>(&'a self, signal: &'a SignalId) -> impl Iterator<Item = &'a Evidence> + 'a {
         self.evidence.iter().filter(move |evidence| &evidence.signal_id == signal)
     }
 
-    fn connections_for<'a>(&'a self, signal: &'a SignalId) -> impl Iterator<Item = &'a Connection> + 'a {
+    pub(crate) fn connections_for<'a>(&'a self, signal: &'a SignalId) -> impl Iterator<Item = &'a Connection> + 'a {
         self.connections
             .iter()
             .filter(move |connection| connection.signal_id.as_ref() == Some(signal))
     }
 
-    fn connected_to(&self, signal: &SignalId) -> Vec<ConnectedLabel> {
+    pub(crate) fn connected_to(&self, signal: &SignalId) -> Vec<ConnectedLabel> {
         let mut best: BTreeMap<String, ConnectedLabel> = BTreeMap::new();
         for connection in self.connections_for(signal) {
             if !matches!(connection.target_kind, ConnectionTargetKind::Context | ConnectionTargetKind::Project) {
@@ -363,9 +405,32 @@ impl Snapshot {
         matched_rules.sort();
         matched_rules.dedup();
 
+        let publishers = evidence
+            .iter()
+            .filter(|e| e.claim != ClaimKind::Contradiction)
+            // A publisher is a web origin: the same host and port.
+            .map(|e| {
+                let url = self.sources.get(&e.source_id).map(|s| &s.canonical_url).unwrap_or(&e.url);
+                url.origin().ascii_serialization()
+            })
+            .collect::<HashSet<_>>();
+        let contradictions = evidence
+            .iter()
+            .filter(|e| e.claim == ClaimKind::Contradiction)
+            .map(|e| &e.item_id)
+            .collect::<HashSet<_>>()
+            .len();
+        let open_questions = self
+            .insights
+            .iter()
+            .filter(|i| i.status == InsightStatus::Open && i.kind.is_open_question() && i.signal_ids.contains(&signal.id))
+            .count();
         let ranking = explain_rank(&RankingInput {
             contexts: contexts.into_values().collect(),
             sources: sources.len(),
+            independent_publishers: publishers.len(),
+            open_questions,
+            contradictions,
             connection_strength,
             change_kind: signal.change.kind,
             prior_signals_on_subject,
@@ -382,13 +447,14 @@ impl Snapshot {
             source_count: sources.len(),
             observation_count: items.len(),
             evidence_count: evidence.len(),
+            contradiction_count: contradictions,
             primary: self.item_ref(&signal.item_id),
             last_observed_at,
             ranking,
         }
     }
 
-    fn ranked(&self, now: DateTime<Utc>) -> Vec<SignalSummary> {
+    pub(crate) fn ranked(&self, now: DateTime<Utc>) -> Vec<SignalSummary> {
         let mut summaries = self.signals.iter().map(|signal| self.summarize(signal, now)).collect::<Vec<_>>();
         summaries.sort_by(|a, b| {
             b.ranking
@@ -408,7 +474,7 @@ impl Snapshot {
         summaries
     }
 
-    fn trace(&self, evidence: &Evidence) -> EvidenceTrace {
+    pub(crate) fn trace(&self, evidence: &Evidence) -> EvidenceTrace {
         EvidenceTrace {
             evidence: evidence.clone(),
             item: self.item_ref(&evidence.item_id),
@@ -576,6 +642,7 @@ impl StreamRuntime {
             signals_corroborated: vec![],
             understood_without_signal: vec![],
             rejected: vec![],
+            notices: vec![],
         };
         if let Err(error) = self.observe_inner(&mut source, &mut report, progress).await {
             let message = format!("{error:#}");
@@ -801,25 +868,8 @@ impl StreamRuntime {
                 }
                 continue;
             }
-            let proposal = self
-                .interpreter
-                .interpret(&InterpretationInput { item: &item, contexts: &contexts, prior: &prior })
-                .await;
-            let verified = match proposal {
-                Err(error) => {
-                    let rejections = vec![Rejection { claim: "interpretation".into(), reason: format!("{error:#}") }];
-                    self.record_rejection(&item, &rejections).await?;
-                    report.rejected.push(RejectedInterpretation { item_id: item.id.clone(), rejections });
-                    continue;
-                }
-                Ok(proposal) => match verify(proposal, &item, &contexts, &prior) {
-                    Ok(verified) => verified,
-                    Err(rejections) => {
-                        self.record_rejection(&item, &rejections).await?;
-                        report.rejected.push(RejectedInterpretation { item_id: item.id.clone(), rejections });
-                        continue;
-                    }
-                },
+            let Some((verified, interpreter_id)) = self.interpret_item(&item, &contexts, &prior, report).await? else {
+                continue;
             };
 
             if stage == ProcessingStage::Understanding {
@@ -839,7 +889,7 @@ impl StreamRuntime {
                         .map(|signal_id| (signal_id, link.clone()))
                 });
             let meaningful = primary || !interpretation.context_matches.is_empty() || consolidation.is_some();
-            self.record_decisions(&item, &verified, meaningful).await?;
+            self.record_decisions(&item, &verified, meaningful, &interpreter_id).await?;
             if !meaningful {
                 report.understood_without_signal.push(item.id.clone());
                 continue;
@@ -851,12 +901,12 @@ impl StreamRuntime {
             }
             let signal_id = match consolidation {
                 Some((signal_id, link)) => {
-                    self.corroborate_signal(&signal_id, &item, &verified, &link, &contexts).await?;
+                    self.corroborate_signal(&signal_id, &item, &verified, &link, &contexts, &interpreter_id).await?;
                     report.signals_corroborated.push(signal_id.clone());
                     signal_id
                 }
                 None => {
-                    let signal_id = self.create_signal(&item, &verified, &contexts).await?;
+                    let signal_id = self.create_signal(&item, &verified, &contexts, &interpreter_id).await?;
                     report.signals_created.push(signal_id.clone());
                     signal_id
                 }
@@ -877,6 +927,96 @@ impl StreamRuntime {
             );
         }
         Ok(())
+    }
+
+    /// Record what the intelligence layer did when it did not simply succeed.
+    /// These events are durable and observable (`stream doctor`, AppPort).
+    pub(crate) async fn record_event(
+        &self,
+        operation: &str,
+        status: &str,
+        subject_id: Option<&str>,
+        detail: &str,
+        provider: &str,
+    ) -> Result<()> {
+        let event = IntelligenceEvent {
+            id: IntelligenceEventId::generate(),
+            operation: operation.into(),
+            status: status.into(),
+            subject_id: subject_id.map(ToOwned::to_owned),
+            detail: detail.chars().take(2_000).collect(),
+            provider: provider.into(),
+            created_at: Utc::now(),
+        };
+        self.store
+            .insert("IntelligenceEvent", event.id.as_str(), event_record(&event), true)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn intelligence_events(&self) -> Result<Vec<IntelligenceEvent>> {
+        let mut events = self
+            .store
+            .all("IntelligenceEvent")
+            .await?
+            .into_iter()
+            .map(event_from_value)
+            .collect::<Result<Vec<_>>>()?;
+        events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(events)
+    }
+
+    /// Interpret and verify one item: the primary interpreter first, then the
+    /// local fallback if the primary fails or its proposal is refused.
+    async fn interpret_item(
+        &self,
+        item: &Item,
+        contexts: &[ContextEntry],
+        prior: &[PriorItem],
+        report: &mut ObservationReport,
+    ) -> Result<Option<(Verified, String)>> {
+        let mut interpreters = vec![self.interpreter.clone()];
+        interpreters.extend(self.fallback_interpreter.clone());
+        let total = interpreters.len();
+        for (attempt, interpreter) in interpreters.into_iter().enumerate() {
+            let is_last = attempt + 1 == total;
+            let input = InterpretationInput { item, contexts, prior };
+            let rejections = match interpreter.interpret(&input).await {
+                Err(error) => {
+                    let detail = format!("{error:#}");
+                    self.record_event("interpret", "failed", Some(item.id.as_str()), &detail, interpreter.id()).await?;
+                    vec![Rejection { claim: "interpretation".into(), reason: detail }]
+                }
+                Ok(proposal) => match verify(proposal, item, contexts, prior) {
+                    Ok(verified) => {
+                        if !verified.rejections.is_empty() {
+                            let detail = serde_json::to_string(&verified.rejections)?;
+                            self.record_event("interpret", "rejected", Some(item.id.as_str()), &detail, interpreter.id())
+                                .await?;
+                        }
+                        if attempt > 0 {
+                            report.notices.push(format!(
+                                "“{}” was understood with Stream's local interpreter because the model was unavailable or unsupported.",
+                                item.title
+                            ));
+                        }
+                        return Ok(Some((verified, interpreter.id().to_owned())));
+                    }
+                    Err(rejections) => {
+                        let detail = serde_json::to_string(&rejections)?;
+                        self.record_event("interpret", "rejected", Some(item.id.as_str()), &detail, interpreter.id()).await?;
+                        rejections
+                    }
+                },
+            };
+            self.record_rejection(item, &rejections, interpreter.id()).await?;
+            report.rejected.push(RejectedInterpretation { item_id: item.id.clone(), rejections });
+            if !is_last {
+                self.record_event("interpret", "fallback", Some(item.id.as_str()), "using the local interpreter", interpreter.id())
+                    .await?;
+            }
+        }
+        Ok(None)
     }
 
     async fn latest_provenance(&self, item_id: &ItemId) -> Result<Option<Provenance>> {
@@ -1008,7 +1148,13 @@ impl StreamRuntime {
         Ok(())
     }
 
-    async fn create_signal(&self, item: &Item, verified: &Verified, contexts: &[ContextEntry]) -> Result<SignalId> {
+    async fn create_signal(
+        &self,
+        item: &Item,
+        verified: &Verified,
+        contexts: &[ContextEntry],
+        interpreter_id: &str,
+    ) -> Result<SignalId> {
         let interpretation = &verified.interpretation;
         let now = Utc::now();
         let signal = Signal {
@@ -1019,7 +1165,7 @@ impl StreamRuntime {
             change: interpretation.change.value.clone(),
             why_it_matters: interpretation.why_it_matters.as_ref().map(|claim| claim.value.clone()),
             status: SignalStatus::Open,
-            interpreter: self.interpreter.id().to_owned(),
+            interpreter: interpreter_id.to_owned(),
             confidence: (interpretation.topic.confidence + interpretation.subject.confidence + interpretation.change.confidence)
                 / 3.0,
             created_at: now,
@@ -1071,7 +1217,192 @@ impl StreamRuntime {
         for link in interpretation.item_links.iter() {
             self.relate_items(&signal.id, item, &provenance, link, RelationKind::Related).await?;
         }
+        self.persist_claims(&signal.id, item, &provenance, &interpretation.claims).await?;
         Ok(signal.id)
+    }
+
+    /// Persist labelled claims. Observed/inferred/connected claims carry
+    /// verbatim evidence; hypotheses are stored as hypotheses, never as facts.
+    async fn persist_claims(
+        &self,
+        signal_id: &SignalId,
+        item: &Item,
+        provenance: &Option<Provenance>,
+        claims: &[ProposedClaim],
+    ) -> Result<()> {
+        for proposed in claims {
+            let evidence_ids = self
+                .insert_claim_evidence(signal_id, item, provenance, ClaimKind::Statement, &proposed.excerpts)
+                .await?;
+            let claim = SignalClaim {
+                id: ClaimId::generate(),
+                signal_id: signal_id.clone(),
+                item_id: item.id.clone(),
+                basis: proposed.basis,
+                statement: proposed.statement.clone(),
+                confidence: proposed.confidence,
+                rationale: proposed.rationale.clone(),
+                evidence_ids,
+                context_ids: proposed.context_ids.clone(),
+                created_at: Utc::now(),
+            };
+            self.store.insert("Claim", claim.id.as_str(), claim_record(&claim), true).await?;
+        }
+        Ok(())
+    }
+
+    /// Sentences of a new observation that the signal's earlier observations
+    /// do not already say: what this source adds. Verbatim, so they are
+    /// ordinary addressable evidence.
+    async fn novel_details(&self, signal_id: &SignalId, item: &Item) -> Result<Vec<Excerpt>> {
+        let mut known = String::new();
+        let mut seen = HashSet::new();
+        for evidence in self.store.find("Evidence", json!({ "signal": signal_id.as_str() })).await? {
+            let other = ItemId::new(value_string(&evidence, "item")?);
+            if other == item.id || !seen.insert(other.clone()) {
+                continue;
+            }
+            if let Some(value) = self.store.get("Item", other.as_str()).await? {
+                let other = item_from_value(value)?;
+                known.push_str(&other.title);
+                known.push('\n');
+                known.push_str(&other.content_text);
+                known.push('\n');
+            }
+        }
+        let known_terms = stream_semantic::key_terms(&known, "", 400).into_iter().collect::<HashSet<_>>();
+        let mut details = Vec::new();
+        for sentence in stream_semantic::sentences(&item.content_text).into_iter().take(40) {
+            if sentence.split_whitespace().count() < 6 {
+                continue;
+            }
+            let terms = stream_semantic::key_terms(sentence, "", 20);
+            if terms.is_empty() {
+                continue;
+            }
+            let covered = terms.iter().filter(|t| known_terms.contains(*t)).count() as f32 / terms.len() as f32;
+            // A new detail: at least 40% of its vocabulary is new to the signal.
+            if covered <= 0.6 {
+                details.push(Excerpt { locator: EvidenceLocator::Content, text: sentence.to_owned() });
+            }
+            if details.len() == 2 {
+                break;
+            }
+        }
+        Ok(details)
+    }
+
+    pub async fn claims_of_signal(&self, signal_id: &SignalId) -> Result<Vec<SignalClaim>> {
+        let mut claims = self
+            .store
+            .find("Claim", json!({ "signal": signal_id.as_str() }))
+            .await?
+            .into_iter()
+            .map(claim_from_value)
+            .collect::<Result<Vec<_>>>()?;
+        claims.sort_by(|a, b| a.basis_rank().cmp(&b.basis_rank()).then(a.created_at.cmp(&b.created_at)));
+        Ok(claims)
+    }
+
+    pub async fn synthesis_of(&self, signal_id: &SignalId) -> Result<Option<Synthesis>> {
+        self.store
+            .get("Synthesis", &synthesis_id(signal_id))
+            .await?
+            .map(synthesis_from_value)
+            .transpose()
+    }
+
+    /// Recompute a signal's cross-source synthesis from its evidence.
+    pub(crate) async fn refresh_synthesis(&self, signal_id: &SignalId) -> Result<Option<Synthesis>> {
+        let Some(signal) = self.get_signal_record(signal_id).await? else { return Ok(None) };
+        let evidence = self
+            .store
+            .find("Evidence", json!({ "signal": signal_id.as_str() }))
+            .await?
+            .into_iter()
+            .map(evidence_from_value)
+            .collect::<Result<Vec<_>>>()?;
+        let mut observations: Vec<Observation> = Vec::new();
+        for record in &evidence {
+            if let Some(existing) = observations.iter_mut().find(|o| o.item_id == record.item_id) {
+                existing.contradicts |= record.claim == ClaimKind::Contradiction;
+                existing.observed_at = existing.observed_at.min(record.observed_at);
+                existing.evidence.push(ObservationEvidence { id: record.id.clone(), claim: record.claim, excerpt: record.excerpt.clone() });
+                continue;
+            }
+            let item = self.store.get("Item", record.item_id.as_str()).await?.map(item_from_value).transpose()?;
+            let source = self.get_source(&record.source_id).await?;
+            // Publisher identity is the web origin (host and port), as in ranking.
+            let url = source.as_ref().map(|s| &s.canonical_url).unwrap_or(&record.url);
+            let host = match (url.host_str(), url.port()) {
+                (Some(host), Some(port)) => format!("{host}:{port}"),
+                (Some(host), None) => host.to_owned(),
+                _ => url.to_string(),
+            };
+            observations.push(Observation {
+                item_id: record.item_id.clone(),
+                title: item.as_ref().map(|i| i.title.clone()).unwrap_or_default(),
+                source_id: record.source_id.clone(),
+                source_label: source
+                    .as_ref()
+                    .and_then(|s| s.title.clone())
+                    .map(|title| format!("“{title}”"))
+                    .unwrap_or_else(|| host.clone()),
+                host,
+                observed_at: record.observed_at,
+                contradicts: record.claim == ClaimKind::Contradiction,
+                evidence: vec![ObservationEvidence { id: record.id.clone(), claim: record.claim, excerpt: record.excerpt.clone() }],
+            });
+        }
+        if observations.len() < 2 {
+            return Ok(None);
+        }
+        observations.sort_by(|a, b| a.observed_at.cmp(&b.observed_at));
+        let input = SynthesisInput {
+            signal_id: signal.id.clone(),
+            subject: signal.subject.label.clone(),
+            change: signal.change.statement.clone(),
+            why_it_matters: signal.why_it_matters.clone(),
+            observations,
+        };
+
+        let mut synthesizers = vec![self.synthesizer.clone()];
+        synthesizers.extend(self.fallback_synthesizer.clone());
+        for synthesizer in synthesizers {
+            match synthesizer.synthesize(&input).await {
+                Ok(proposal) => {
+                    let (verified, rejections) = verify_synthesis(proposal, &input);
+                    if !rejections.is_empty() {
+                        let detail = serde_json::to_string(&rejections)?;
+                        self.record_event("synthesize", "rejected", Some(signal_id.as_str()), &detail, synthesizer.id())
+                            .await?;
+                    }
+                    let synthesis = Synthesis {
+                        signal_id: signal.id.clone(),
+                        agreements: verified.agreements,
+                        new_information: verified.new_information,
+                        differences: verified.differences,
+                        uncertainties: verified.uncertainties,
+                        source_count: input.observations.iter().map(|o| &o.source_id).collect::<HashSet<_>>().len(),
+                        observation_count: input.observations.len(),
+                        generated_by: synthesizer.id().to_owned(),
+                        updated_at: Utc::now(),
+                    };
+                    let id = synthesis_id(signal_id);
+                    if self.store.get("Synthesis", &id).await?.is_some() {
+                        self.store.update("Synthesis", &id, synthesis_record(&synthesis)).await?;
+                    } else {
+                        self.store.insert("Synthesis", &id, synthesis_record(&synthesis), true).await?;
+                    }
+                    return Ok(Some(synthesis));
+                }
+                Err(error) => {
+                    self.record_event("synthesize", "failed", Some(signal_id.as_str()), &format!("{error:#}"), synthesizer.id())
+                        .await?;
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Record an Item → Item relationship through the existing ItemRelation
@@ -1084,18 +1415,23 @@ impl StreamRuntime {
         link: &stream_semantic::ItemLink,
         relation: RelationKind,
     ) -> Result<()> {
+        let disputes = link.stance == Stance::Contradicts;
         let relation_record = ItemRelation {
             id: ItemRelationId::generate(),
             from_item_id: item.id.clone(),
             to_item_id: link.item_id.clone(),
             relation,
-            evidence: link.rationale.clone(),
+            evidence: if disputes { format!("disputes: {}", link.rationale) } else { link.rationale.clone() },
             created_at: Utc::now(),
         };
         self.store
             .insert("ItemRelation", relation_record.id.as_str(), item_relation_record(&relation_record), true)
             .await?;
-        let claim = if relation == RelationKind::SameStory { ClaimKind::Corroboration } else { ClaimKind::Connection };
+        let claim = match (relation, disputes) {
+            (RelationKind::SameStory, true) => ClaimKind::Contradiction,
+            (RelationKind::SameStory, false) => ClaimKind::Corroboration,
+            _ => ClaimKind::Connection,
+        };
         let excerpts = if link.excerpts.is_empty() {
             vec![Excerpt { locator: EvidenceLocator::Title, text: item.title.clone() }]
         } else {
@@ -1112,7 +1448,11 @@ impl StreamRuntime {
             ConnectionTargetKind::Item,
             link.item_id.to_string(),
             target_title,
-            if relation == RelationKind::SameStory { ConnectionRelation::SameChange } else { ConnectionRelation::Related },
+            match (relation, disputes) {
+                (RelationKind::SameStory, true) => ConnectionRelation::Contradicts,
+                (RelationKind::SameStory, false) => ConnectionRelation::SameChange,
+                _ => ConnectionRelation::Related,
+            },
             link.strength,
             link.rationale.clone(),
             evidence_ids,
@@ -1129,6 +1469,7 @@ impl StreamRuntime {
         verified: &Verified,
         link: &stream_semantic::ItemLink,
         contexts: &[ContextEntry],
+        _interpreter_id: &str,
     ) -> Result<()> {
         let mut signal = self
             .get_signal_record(signal_id)
@@ -1141,6 +1482,8 @@ impl StreamRuntime {
             .await?;
         self.insert_claim_evidence(signal_id, item, &provenance, ClaimKind::Change, &interpretation.change.excerpts)
             .await?;
+        let details = self.novel_details(signal_id, item).await?;
+        self.insert_claim_evidence(signal_id, item, &provenance, ClaimKind::Detail, &details).await?;
         let mut same_change = link.clone();
         same_change.item_id = signal.item_id.clone();
         self.relate_items(signal_id, item, &provenance, &same_change, RelationKind::SameStory).await?;
@@ -1162,12 +1505,32 @@ impl StreamRuntime {
                 signal.why_it_matters = Some(why.value.clone());
             }
         }
+        // A corroborating observation adds its own facts and open possibilities;
+        // connections and relevance are already represented at signal level.
+        let own = interpretation
+            .claims
+            .iter()
+            .filter(|c| matches!(c.basis, stream_model::ClaimBasis::Observed | stream_model::ClaimBasis::Hypothesis))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.persist_claims(signal_id, item, &provenance, &own).await?;
         signal.updated_at = Utc::now();
         self.store.update("Signal", signal.id.as_str(), signal_record(&signal)).await?;
+        self.refresh_synthesis(signal_id).await?;
         Ok(())
     }
 
-    async fn record_decision(&self, item: &Item, decision_type: &str, decision: &str, state: &str, confidence: f32, explanation: &str) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    async fn record_decision(
+        &self,
+        item: &Item,
+        decision_type: &str,
+        decision: &str,
+        state: &str,
+        confidence: f32,
+        explanation: &str,
+        model: &str,
+    ) -> Result<()> {
         let id = SemanticDecisionId::generate();
         self.store
             .insert(
@@ -1176,7 +1539,7 @@ impl StreamRuntime {
                 json!({
                     "__id": id.as_str(),
                     "item": item.id.as_str(),
-                    "model": self.interpreter.id(),
+                    "model": model,
                     "decision_type": decision_type,
                     "decision": decision,
                     "advisory_state": state,
@@ -1192,32 +1555,40 @@ impl StreamRuntime {
 
     /// Every proposal is recorded as an advisory SemanticDecision, whether or
     /// not it became a signal.
-    async fn record_decisions(&self, item: &Item, verified: &Verified, meaningful: bool) -> Result<()> {
+    async fn record_decisions(&self, item: &Item, verified: &Verified, meaningful: bool, model: &str) -> Result<()> {
         let i = &verified.interpretation;
-        self.record_decision(item, "topic", &i.topic.value.label, "advisory", i.topic.confidence, &i.topic.rationale)
+        self.record_decision(item, "topic", &i.topic.value.label, "advisory", i.topic.confidence, &i.topic.rationale, model)
             .await?;
-        self.record_decision(item, "subject", &i.subject.value.label, "advisory", i.subject.confidence, &i.subject.rationale)
+        self.record_decision(item, "subject", &i.subject.value.label, "advisory", i.subject.confidence, &i.subject.rationale, model)
             .await?;
-        self.record_decision(item, "change", &i.change.value.statement, "advisory", i.change.confidence, &i.change.rationale)
+        self.record_decision(item, "change", &i.change.value.statement, "advisory", i.change.confidence, &i.change.rationale, model)
             .await?;
         if let Some(why) = &i.why_it_matters {
-            self.record_decision(item, "why_it_matters", &why.value, "advisory", why.confidence, &why.rationale)
+            self.record_decision(item, "why_it_matters", &why.value, "advisory", why.confidence, &why.rationale, model)
                 .await?;
         }
         if !verified.rejections.is_empty() {
             let reasons = serde_json::to_string(&verified.rejections)?;
-            self.record_decision(item, "evidence_gate", "partially_rejected", "rejected", 0.0, &reasons).await?;
+            self.record_decision(item, "evidence_gate", "partially_rejected", "rejected", 0.0, &reasons, model).await?;
         }
         if !meaningful {
-            self.record_decision(item, "signal", "not_created", "advisory", 0.0, "not connected to any context or existing signal")
-                .await?;
+            self.record_decision(
+                item,
+                "signal",
+                "not_created",
+                "advisory",
+                0.0,
+                "not connected to any context or existing signal",
+                model,
+            )
+            .await?;
         }
         Ok(())
     }
 
-    async fn record_rejection(&self, item: &Item, rejections: &[Rejection]) -> Result<()> {
+    async fn record_rejection(&self, item: &Item, rejections: &[Rejection], model: &str) -> Result<()> {
         let reasons = serde_json::to_string(rejections)?;
-        self.record_decision(item, "evidence_gate", "rejected", "rejected", 0.0, &reasons).await
+        self.record_decision(item, "evidence_gate", "rejected", "rejected", 0.0, &reasons, model).await
     }
 
     // ----------------------------------------------------------------- context
@@ -1415,7 +1786,7 @@ impl StreamRuntime {
         self.store.get("Signal", id.as_str()).await?.map(signal_from_value).transpose()
     }
 
-    async fn snapshot(&self) -> Result<Snapshot> {
+    pub(crate) async fn snapshot(&self) -> Result<Snapshot> {
         let rules = self
             .store
             .all("Rule")
@@ -1441,6 +1812,25 @@ impl StreamRuntime {
             }
         }
         Ok(Snapshot {
+            claims: self.store.all("Claim").await?.into_iter().map(claim_from_value).collect::<Result<Vec<_>>>()?,
+            syntheses: self
+                .store
+                .all("Synthesis")
+                .await?
+                .into_iter()
+                .map(synthesis_from_value)
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .map(|s| (s.signal_id.clone(), s))
+                .collect(),
+            insights: self.store.all("Insight").await?.into_iter().map(insight_from_value).collect::<Result<Vec<_>>>()?,
+            item_relations: self
+                .store
+                .all("ItemRelation")
+                .await?
+                .into_iter()
+                .map(item_relation_from_value)
+                .collect::<Result<Vec<_>>>()?,
             signals: self.all_signals().await?,
             evidence: self.all_evidence().await?,
             connections: self.all_connections().await?,
@@ -1495,11 +1885,16 @@ impl StreamRuntime {
                 observation_ids.push(trace.evidence.item_id.clone());
             }
         }
+        let mut claims = snapshot.claims.iter().filter(|c| &c.signal_id == id).cloned().collect::<Vec<_>>();
+        claims.sort_by(|a, b| a.basis_rank().cmp(&b.basis_rank()).then(a.created_at.cmp(&b.created_at)));
         Ok(Some(SignalDetail {
             summary,
             observations: observation_ids.iter().filter_map(|id| snapshot.item_ref(id)).collect(),
             connections: snapshot.connections_for(id).cloned().collect(),
             evidence,
+            claims,
+            synthesis: snapshot.syntheses.get(id).map(SynthesisView::from),
+            insights: snapshot.insights.iter().filter(|i| i.signal_ids.contains(id)).cloned().collect(),
         }))
     }
 

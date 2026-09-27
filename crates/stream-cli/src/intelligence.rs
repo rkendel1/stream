@@ -155,6 +155,25 @@ pub fn format_detail(detail: &SignalDetail) -> String {
             let _ = writeln!(out, "  {}  ({}, {} {:.2})", label.label, label.kind, label.relation, label.strength);
         }
     }
+    if !detail.claims.is_empty() {
+        let _ = writeln!(out, "\nClaims (observed = stated by a source; everything else is Stream's reasoning)");
+        for claim in &detail.claims {
+            let _ = writeln!(out, "  {}  {}", basis_tag(claim.basis), claim.statement);
+        }
+    }
+    if let Some(synthesis) = &detail.synthesis {
+        let _ = writeln!(out, "\nAcross {} observations from {} sources", synthesis.observation_count, synthesis.source_count);
+        for (label, points) in [
+            ("Agree", &synthesis.agreements),
+            ("New", &synthesis.new_information),
+            ("Differ", &synthesis.differences),
+            ("Uncertain", &synthesis.uncertainties),
+        ] {
+            for point in points {
+                let _ = writeln!(out, "  {label:<9} {}", point.statement);
+            }
+        }
+    }
     let _ = writeln!(
         out,
         "\nWhy is this here?  {}",
@@ -176,7 +195,9 @@ pub fn format_detail(detail: &SignalDetail) -> String {
             None => groups.push((vec![claim], trace)),
         }
     }
-    const ORDER: [&str; 6] = ["why_it_matters", "connection", "change", "subject", "topic", "corroboration"];
+    const ORDER: [&str; 9] = [
+        "why_it_matters", "connection", "change", "subject", "topic", "statement", "detail", "corroboration", "contradiction",
+    ];
     let rank = |claim: &String| ORDER.iter().position(|c| c == claim).unwrap_or(ORDER.len());
     for (claims, _) in groups.iter_mut() {
         claims.sort_by_key(|claim| rank(claim));
@@ -323,4 +344,188 @@ pub async fn sources(runtime: &StreamRuntime) -> Result<String> {
         })
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn basis_tag(basis: stream_model::ClaimBasis) -> &'static str {
+    match basis {
+        stream_model::ClaimBasis::Observed => "observed  ",
+        stream_model::ClaimBasis::Connected => "connected ",
+        stream_model::ClaimBasis::Inferred => "inferred  ",
+        stream_model::ClaimBasis::Hypothesis => "hypothesis",
+    }
+}
+
+pub fn format_answer(answer: &stream_core::Answer) -> String {
+    let mut out = String::new();
+    let numbers = answer
+        .evidence
+        .iter()
+        .enumerate()
+        .map(|(index, trace)| (trace.evidence.id.clone(), index + 1))
+        .collect::<std::collections::HashMap<_, _>>();
+    let _ = writeln!(out, "{}", answer.summary);
+    match answer.sufficiency {
+        stream_reason::Sufficiency::Sufficient => {}
+        stream_reason::Sufficiency::Partial => {
+            let _ = writeln!(out, "(Partial: Stream's evidence only partly answers this.)");
+        }
+        stream_reason::Sufficiency::Insufficient => {
+            let _ = writeln!(out, "(Insufficient evidence.)");
+        }
+    }
+    if !answer.statements.is_empty() {
+        let _ = writeln!(out);
+    }
+    for statement in &answer.statements {
+        let cites = statement
+            .evidence_ids
+            .iter()
+            .filter_map(|id| numbers.get(id))
+            .map(|n| format!("[{n}]"))
+            .collect::<Vec<_>>()
+            .join("");
+        let _ = writeln!(out, "  {}  {} {}", basis_tag(statement.basis), statement.text, cites);
+    }
+    if !answer.uncertainties.is_empty() {
+        let _ = writeln!(out, "\nUncertain");
+        for uncertainty in &answer.uncertainties {
+            let _ = writeln!(out, "  - {uncertainty}");
+        }
+    }
+    if !answer.connected_to.is_empty() {
+        let labels = answer.connected_to.iter().map(|c| c.label.as_str()).collect::<Vec<_>>();
+        let _ = writeln!(out, "\nConnected to: {}", labels.join(" · "));
+    }
+    if !answer.evidence.is_empty() {
+        let _ = writeln!(out, "\nEvidence");
+        for (index, trace) in answer.evidence.iter().enumerate() {
+            let source = trace.source.as_ref().map(|s| s.canonical_url.to_string()).unwrap_or_default();
+            let _ = writeln!(out, "  [{}] “{}”", index + 1, trace.evidence.excerpt);
+            let _ = writeln!(out, "      {}  {}  ({})", trace.evidence.id, source, trace.evidence.url);
+        }
+    }
+    let _ = writeln!(
+        out,
+        "\nStream looked at {} signal(s) and {} evidence excerpt(s){}.",
+        answer.retrieved.signal_ids.len(),
+        answer.retrieved.evidence_count,
+        if answer.retrieved.focused { " you pointed at" } else { "" }
+    );
+    for notice in &answer.notices {
+        let _ = writeln!(out, "Note: {notice}");
+    }
+    if !answer.follow_ups.is_empty() {
+        let _ = writeln!(out, "Ask next: {}", answer.follow_ups.join(" | "));
+    }
+    out.trim_end().to_owned()
+}
+
+pub async fn ask(
+    runtime: &StreamRuntime,
+    question: String,
+    signals: Vec<String>,
+    contexts: Vec<String>,
+    sources: Vec<String>,
+    save: Option<String>,
+    json: bool,
+) -> Result<String> {
+    let request = stream_core::AskRequest {
+        question,
+        focus: stream_core::Focus {
+            signal_ids: signals.into_iter().map(SignalId::new).collect(),
+            context_ids: contexts.into_iter().map(stream_model::ContextId::new).collect(),
+            source_ids: sources.into_iter().map(stream_model::SourceId::new).collect(),
+            ..Default::default()
+        },
+        history: vec![],
+    };
+    let answer = runtime.ask(request).await?;
+    let mut out = if json { serde_json::to_string_pretty(&answer)? } else { format_answer(&answer) };
+    if let Some(kind) = save {
+        let kind = stream_model::InsightKind::parse(&kind).ok_or_else(|| anyhow!("unknown insight kind: {kind}"))?;
+        let chosen = answer
+            .statements
+            .iter()
+            .find(|s| s.basis == stream_model::ClaimBasis::Inferred)
+            .or_else(|| answer.statements.first())
+            .ok_or_else(|| anyhow!("nothing to save: the answer has no supported statements"))?;
+        let insight = runtime
+            .save_insight(stream_core::NewInsight {
+                kind: Some(kind),
+                statement: chosen.text.clone(),
+                question: Some(answer.question.clone()),
+                evidence_ids: answer.statements.iter().flat_map(|s| s.evidence_ids.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
+                context_ids: chosen.context_ids.clone(),
+                uncertainty: answer.uncertainties.first().cloned(),
+                ..Default::default()
+            })
+            .await?;
+        out.push_str(&format!("\n\nSaved {} {}", insight.kind, insight.id));
+    }
+    Ok(out)
+}
+
+pub async fn insights(runtime: &StreamRuntime, json: bool) -> Result<String> {
+    let insights = runtime.list_insights(None).await?;
+    if json {
+        return Ok(serde_json::to_string_pretty(&insights)?);
+    }
+    if insights.is_empty() {
+        return Ok("No saved insights yet. Save one with `stream ask \"…\" --save insight`.".into());
+    }
+    Ok(insights
+        .iter()
+        .map(|i| format!("{}\t{}\t{}\t{}\t{}", i.id, i.kind, i.status, i.basis, i.statement))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+pub async fn insight(runtime: &StreamRuntime, id: &str, resolve: bool, drop: bool, json: bool) -> Result<String> {
+    let id = stream_model::InsightId::new(id);
+    if resolve || drop {
+        let status = if resolve { stream_model::InsightStatus::Resolved } else { stream_model::InsightStatus::Dropped };
+        let insight = runtime.set_insight_status(&id, status).await?;
+        return Ok(format!("{}\t{}", insight.id, insight.status));
+    }
+    let view = runtime.get_insight(&id).await?.ok_or_else(|| anyhow!("insight not found: {id}"))?;
+    if json {
+        return Ok(serde_json::to_string_pretty(&view)?);
+    }
+    let insight = &view.insight;
+    let mut out = String::new();
+    let _ = writeln!(out, "{} {}  ({}, {}, advisory)", insight.kind, insight.id, insight.basis, insight.status);
+    let _ = writeln!(out, "{}", insight.statement);
+    if let Some(question) = &insight.question {
+        let _ = writeln!(out, "From the question: {question}");
+    }
+    if let Some(uncertainty) = &insight.uncertainty {
+        let _ = writeln!(out, "Uncertainty: {uncertainty}");
+    }
+    for signal in &view.signals {
+        let _ = writeln!(out, "Signal   {} — {}: {}", signal.id, signal.subject, signal.change);
+    }
+    for context in &view.contexts {
+        let _ = writeln!(out, "Context  {}", context.label);
+    }
+    for trace in &view.evidence {
+        let _ = writeln!(out, "Evidence “{}” — {}", trace.evidence.excerpt, trace.evidence.url);
+    }
+    Ok(out.trim_end().to_owned())
+}
+
+pub async fn doctor_line(runtime: &StreamRuntime) -> Result<String> {
+    let events = runtime.intelligence_events().await?;
+    let recent = events.iter().filter(|e| chrono::Utc::now() - e.created_at < chrono::Duration::days(7));
+    let (failed, rejected) = recent.fold((0, 0), |(f, r), e| match e.status.as_str() {
+        "failed" => (f + 1, r),
+        "rejected" => (f, r + 1),
+        _ => (f, r),
+    });
+    Ok(format!(
+        "- intelligence: {} (interpreter {}); last 7 days: {} provider failures, {} refused proposals",
+        if runtime.model_backed() { "model-backed with local fallback" } else { "local" },
+        runtime.interpreter_id(),
+        failed,
+        rejected
+    ))
 }

@@ -1,19 +1,19 @@
 [package]
-name = "stream-semantic"
+name = "stream-reason"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Stream's reasoning layer: cross-source synthesis and evidence-grounded answers over retrieved Stream knowledge."
 
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-reqwest.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
-url.workspace = true
 stream-model = { path = "../stream-model" }
+stream-semantic = { path = "../stream-semantic" }
 
 [dev-dependencies]
-chrono.workspace = true
+tokio.workspace = true

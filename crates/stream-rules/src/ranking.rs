@@ -15,6 +15,15 @@ pub struct RankingInput {
     pub contexts: Vec<(String, f32)>,
     /// Distinct sources that observed this change.
     pub sources: usize,
+    /// Distinct publishers (hosts) among those sources: independence.
+    #[serde(default)]
+    pub independent_publishers: usize,
+    /// Open questions, hypotheses, and investigations the user saved about it.
+    #[serde(default)]
+    pub open_questions: usize,
+    /// Observations that dispute the change.
+    #[serde(default)]
+    pub contradictions: usize,
     /// Strongest link to a previously observed item, in [0, 1].
     pub connection_strength: f32,
     pub change_kind: ChangeKind,
@@ -55,6 +64,8 @@ pub const WEIGHT_CONNECTION: f64 = 1.0;
 pub const WEIGHT_CHANGE: f64 = 1.0;
 pub const WEIGHT_RECENCY: f64 = 1.0;
 pub const WEIGHT_NOVELTY: f64 = 0.75;
+pub const WEIGHT_OPEN_QUESTIONS: f64 = 1.0;
+pub const WEIGHT_DISPUTED: f64 = 0.75;
 /// Recency halves every three days.
 pub const RECENCY_HALF_LIFE_HOURS: f64 = 72.0;
 
@@ -73,7 +84,6 @@ fn factor(key: &str, label: &str, value: f64, weight: f64, explanation: String) 
 pub fn explain_rank(input: &RankingInput) -> RankingExplanation {
     let context_value = input.contexts.iter().map(|(_, strength)| *strength as f64).sum::<f64>();
     let context_names = input.contexts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
-    let corroborating = input.sources.saturating_sub(1);
     let hours = (input.now - input.last_observed_at).num_minutes().max(0) as f64 / 60.0;
     let recency = 0.5f64.powf(hours / RECENCY_HALF_LIFE_HOURS);
     let novelty = 1.0 / (1.0 + input.prior_signals_on_subject as f64);
@@ -103,12 +113,36 @@ pub fn explain_rank(input: &RankingInput) -> RankingExplanation {
         ),
         factor(
             "corroboration",
-            "Corroborating sources",
-            corroborating as f64 / 3.0,
+            "Independent corroboration",
+            input.independent_publishers.max(1).min(input.sources.max(1)).saturating_sub(1) as f64 / 3.0,
             WEIGHT_CORROBORATION,
-            match input.sources {
-                0 | 1 => "Observed by a single source.".into(),
-                n => format!("{n} independent sources describe this change."),
+            match (input.sources, input.independent_publishers) {
+                (0 | 1, _) => "Observed by a single source.".into(),
+                (n, 0 | 1) => format!("{n} sources, all from one publisher — not independent."),
+                (n, p) if p >= n => format!("{n} independent sources describe this change."),
+                (n, p) => format!("{n} sources from {p} independent publishers describe this change."),
+            },
+        ),
+        factor(
+            "open_questions",
+            "Unresolved questions",
+            input.open_questions as f64 / 2.0,
+            WEIGHT_OPEN_QUESTIONS,
+            match input.open_questions {
+                0 => "No open questions of yours about this.".into(),
+                1 => "You have 1 open question or investigation about this.".into(),
+                n => format!("You have {n} open questions or investigations about this."),
+            },
+        ),
+        factor(
+            "disputed",
+            "Disputed",
+            if input.contradictions > 0 { 1.0 } else { 0.0 },
+            WEIGHT_DISPUTED,
+            match input.contradictions {
+                0 => "No source disputes it.".into(),
+                1 => "One source disputes it — unresolved.".into(),
+                n => format!("{n} sources dispute it — unresolved."),
             },
         ),
         factor(
@@ -187,6 +221,9 @@ mod tests {
         RankingInput {
             contexts: vec![],
             sources: 1,
+            independent_publishers: 1,
+            open_questions: 0,
+            contradictions: 0,
             connection_strength: 0.0,
             change_kind: ChangeKind::Describes,
             prior_signals_on_subject: 0,
@@ -203,6 +240,7 @@ mod tests {
         let connected = explain_rank(&RankingInput {
             contexts: vec![("Portable compute".into(), 0.8)],
             sources: 3,
+            independent_publishers: 3,
             ..input()
         });
         assert!(connected.total > plain.total);
@@ -212,7 +250,7 @@ mod tests {
     #[test]
     fn every_factor_explains_itself() {
         let explanation = explain_rank(&input());
-        assert_eq!(explanation.factors.len(), 7);
+        assert_eq!(explanation.factors.len(), 9);
         assert!(explanation.factors.iter().all(|f| !f.explanation.is_empty()));
         let sum: f64 = explanation.factors.iter().map(|f| f.contribution).sum();
         assert!((sum - explanation.total).abs() < 1e-9);
@@ -227,6 +265,17 @@ mod tests {
             ..input()
         });
         assert!(old.total < fresh.total);
+    }
+
+    #[test]
+    fn unresolved_questions_and_disputes_raise_rank_but_one_publisher_is_not_corroboration() {
+        let base = explain_rank(&input());
+        let open = explain_rank(&RankingInput { open_questions: 1, contradictions: 1, ..input() });
+        assert!(open.total > base.total);
+        let same_publisher = explain_rank(&RankingInput { sources: 3, independent_publishers: 1, ..input() });
+        let corroboration = same_publisher.factors.iter().find(|f| f.key == "corroboration").unwrap();
+        assert_eq!(corroboration.value, 0.0);
+        assert!(corroboration.explanation.contains("not independent"));
     }
 
     #[test]

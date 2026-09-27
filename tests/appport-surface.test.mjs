@@ -64,7 +64,7 @@ test('Rust manifest exposes the Stream AppPort capability surface', () => {
   for (const name of [
     'stream.source.add', 'stream.source.list', 'stream.item.get', 'stream.item.list',
     'stream.signal.get', 'stream.signal.list', 'stream.context.list', 'stream.context.add',
-    'stream.connection.list',
+    'stream.connection.list', 'stream.chat.ask', 'stream.reason.retrieve', 'stream.insight.save',
   ]) {
     assert.ok(rustCapabilities.includes(name), `${name} is part of the surface`);
   }
@@ -89,6 +89,15 @@ test('an AppPort client drives Stream through the Rust runtime and FeltDB', asyn
     // The same durable state is visible to the CLI, a separate process.
     assert.match(rust('context', 'list'), /Portable compute/);
     assert.match(rust('sources'), /https:\/\/example\.com\/article/);
+
+    // Reasoning through the portable surface: a structured, grounded answer.
+    const answer = await client.call('stream.chat.ask', { question: 'What connects to portable compute?' });
+    assert.equal(answer.sufficiency, 'insufficient', 'nothing observed yet, and Stream says so');
+    assert.deepEqual(answer.statements, []);
+    assert.ok(answer.summary.includes("don't have enough evidence"));
+    assert.equal(typeof answer.retrieved.evidence_count, 'number');
+    const status = await client.call('stream.intelligence.status', {});
+    assert.equal(status.model_backed, false, 'no model is required to boot');
 
     const contexts = await client.call('stream.context.list', {});
     assert.equal(contexts.length, 1);

@@ -4,13 +4,14 @@
 
 use crate::text::{contains_phrase, is_stopword, key_terms, sentences, stem, stems, tokens};
 use crate::{
-    Claim, ContextMatch, Excerpt, Interpretation, InterpretationInput, Interpreter, ItemLink, LinkKind,
+    Claim, ContextMatch, Excerpt, Interpretation, InterpretationInput, Interpreter, ItemLink, LinkKind, ProposedClaim,
+    Stance,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::BTreeSet;
 use stream_model::{
-    normalize_whitespace, slug, Change, ChangeKind, ContextEntry, ContextKind, EvidenceLocator, Item, SourceKind,
+    normalize_whitespace, slug, Change, ChangeKind, ClaimBasis, ContextEntry, ContextKind, EvidenceLocator, Item, SourceKind,
     Subject, Topic,
 };
 
@@ -100,6 +101,7 @@ pub(crate) fn interpret(input: &InterpretationInput<'_>) -> Interpretation {
     let context_matches = context_matches(item, input.contexts);
     let why_it_matters = why_it_matters(&change.value, &context_matches, input.contexts);
     let item_links = item_links(item, &subject.value, input);
+    let claims = claims(&subject.value, &change, &context_matches, &why_it_matters, input.contexts);
     Interpretation {
         topic,
         subject,
@@ -107,7 +109,55 @@ pub(crate) fn interpret(input: &InterpretationInput<'_>) -> Interpretation {
         context_matches,
         why_it_matters,
         item_links,
+        claims,
     }
+}
+
+/// Labelled claims: what the source states (observed), how it relates to the
+/// user's context (connected), and why that may matter (inferred).
+fn claims(
+    subject: &Subject,
+    change: &Claim<Change>,
+    matches: &[ContextMatch],
+    why: &Option<Claim<String>>,
+    contexts: &[ContextEntry],
+) -> Vec<ProposedClaim> {
+    let mut out = Vec::new();
+    if change.value.kind != ChangeKind::Describes {
+        out.push(ProposedClaim {
+            basis: ClaimBasis::Observed,
+            statement: format!("{}: {}.", subject.label, change.value.statement),
+            excerpts: change.excerpts.clone(),
+            context_ids: vec![],
+            item_ids: vec![],
+            rationale: change.rationale.clone(),
+            confidence: change.confidence,
+        });
+    }
+    for candidate in matches {
+        let Some(context) = contexts.iter().find(|c| c.id == candidate.context_id) else { continue };
+        out.push(ProposedClaim {
+            basis: ClaimBasis::Connected,
+            statement: format!("Connects to {}: the source {}.", context.name, candidate.rationale),
+            excerpts: candidate.excerpts.clone(),
+            context_ids: vec![context.id.clone()],
+            item_ids: vec![],
+            rationale: candidate.rationale.clone(),
+            confidence: candidate.strength,
+        });
+    }
+    if let Some(why) = why {
+        out.push(ProposedClaim {
+            basis: ClaimBasis::Inferred,
+            statement: why.value.clone(),
+            excerpts: why.excerpts.clone(),
+            context_ids: matches.iter().map(|m| m.context_id.clone()).collect(),
+            item_ids: vec![],
+            rationale: "relevance is Stream's inference from the matched context, not a statement of the source".into(),
+            confidence: why.confidence,
+        });
+    }
+    out
 }
 
 fn excerpt(locator: EvidenceLocator, text: &str) -> Excerpt {
@@ -535,6 +585,19 @@ fn why_it_matters(change: &Change, matches: &[ContextMatch], contexts: &[Context
     })
 }
 
+/// Phrases that dispute rather than report a change.
+const DENIAL_MARKERS: &[&str] = &[
+    "denies", "denied", "not true", "is false", "false claim", "no plans", "has no plans", "will not", "won't",
+    "isn't", "is not", "does not", "doesn't", "did not", "didn't", "never", "rumor", "rumour", "unconfirmed",
+    "retracted", "walked back", "reversed", "delayed", "postponed", "cancelled", "canceled", "contrary to",
+    "misleading", "disputes", "debunk",
+];
+
+fn is_denial(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    DENIAL_MARKERS.iter().any(|marker| find_verb(&lower, marker).is_some())
+}
+
 fn item_links(item: &Item, subject: &Subject, input: &InterpretationInput<'_>) -> Vec<ItemLink> {
     let terms = key_terms(&item.title, &item.content_text, 18).into_iter().collect::<BTreeSet<_>>();
     let subject_key = slug(subject.label.as_str());
@@ -576,9 +639,14 @@ fn item_links(item: &Item, subject: &Subject, input: &InterpretationInput<'_>) -
             .map(|(locator, sentence)| excerpt(*locator, sentence))
             .collect::<Vec<_>>();
         let strength = if same_subject { overlap.max(0.7) } else { overlap }.min(1.0);
+        let disputes = located.iter().any(|(_, sentence)| {
+            let stems = stems(sentence);
+            shared.iter().any(|term| stems.contains(term)) && is_denial(sentence)
+        });
         out.push(ItemLink {
             item_id: prior.item_id.clone(),
             kind,
+            stance: if disputes { Stance::Contradicts } else { Stance::Supports },
             strength,
             shared_terms: shared.clone(),
             excerpts: supporting,
@@ -710,6 +778,28 @@ mod tests {
         let result = run(&second, &[], &prior);
         assert_eq!(result.item_links.len(), 1, "{:?}", result.item_links);
         assert_eq!(result.item_links[0].kind, LinkKind::SameChange);
+    }
+
+    #[test]
+    fn disputing_reports_link_to_the_same_change_as_contradictions() {
+        let first = item(
+            "Apple Container adds portable Linux VMs",
+            "Apple Container runs each Linux container in a lightweight virtual machine on macOS.",
+        );
+        let denial = item(
+            "Apple Container Linux VM support delayed",
+            "Apple denies that Apple Container runs each Linux container in a lightweight virtual machine yet; the feature was delayed.",
+        );
+        let prior = vec![PriorItem {
+            item_id: first.id.clone(),
+            signal_id: None,
+            title: first.title.clone(),
+            content_text: first.content_text.clone(),
+            subject: Some("Apple Container".into()),
+        }];
+        let links = run(&denial, &[], &prior).item_links;
+        assert_eq!(links[0].kind, LinkKind::SameChange);
+        assert_eq!(links[0].stance, Stance::Contradicts);
     }
 
     #[test]

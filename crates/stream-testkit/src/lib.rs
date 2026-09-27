@@ -208,3 +208,233 @@ pub const NEWS_FEED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <pubDate>Wed, 23 Sep 2026 09:00:00 GMT</pubDate>
   </item>
 </channel></rss>"#;
+
+/// How the fake model behaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelMode {
+    /// Grounded structured output, plus one fabricated claim for the gate to refuse.
+    Cooperative,
+    /// HTTP 500 on every request.
+    Failing,
+    /// Prose instead of structured output.
+    Malformed,
+}
+
+/// A local OpenAI-compatible chat completions server standing in for a model,
+/// so the real HTTP provider path is exercised without a real model.
+#[derive(Clone)]
+pub struct FakeModelServer {
+    base: String,
+    mode: Arc<Mutex<ModelMode>>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+fn completion(content: &str) -> String {
+    serde_json::json!({
+        "id": "fake", "object": "chat.completion",
+        "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": content } }]
+    })
+    .to_string()
+}
+
+fn user_payload(request: &serde_json::Value) -> serde_json::Value {
+    let text = request["messages"][1]["content"].as_str().unwrap_or_default();
+    let json = text.find('{').map(|i| &text[i..]).unwrap_or("{}");
+    serde_json::from_str(json).unwrap_or_default()
+}
+
+fn first_sentence(text: &str) -> String {
+    text.split(['.', '\n']).map(str::trim).find(|s| s.split_whitespace().count() >= 4).unwrap_or(text).to_owned()
+}
+
+fn fake_interpretation(request: &serde_json::Value) -> String {
+    let payload = user_payload(request);
+    let title = payload["item"]["title"].as_str().unwrap_or_default().to_owned();
+    let content = payload["item"]["content"].as_str().unwrap_or_default().to_owned();
+    let haystack = format!("{title} {content}").to_lowercase();
+    let words = title.split_whitespace().collect::<Vec<_>>();
+    let subject = words.iter().take(2).cloned().collect::<Vec<_>>().join(" ").trim_start_matches("Apple's").trim().to_owned();
+    let subject = if subject.is_empty() { title.clone() } else { subject };
+    let sentence = first_sentence(&content);
+    let quote = |text: &str, location: &str| serde_json::json!({ "text": text, "location": location });
+    let mut connections = Vec::new();
+    let mut context_ids = Vec::new();
+    for context in payload["user_contexts"].as_array().cloned().unwrap_or_default() {
+        let name = context["name"].as_str().unwrap_or_default().to_lowercase();
+        if name.split_whitespace().any(|word| word.len() > 3 && haystack.contains(word)) {
+            let id = context["id"].as_str().unwrap_or_default().to_owned();
+            connections.push(serde_json::json!({
+                "context_id": id, "strength": 0.8,
+                "explanation": format!("The source describes {} in terms of {}.", subject, context["name"].as_str().unwrap_or_default()),
+                "quotes": [quote(&title, "title")]
+            }));
+            context_ids.push(id);
+        }
+    }
+    let related = payload["existing_stream_items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|prior| prior["title"].as_str().unwrap_or_default().to_lowercase().contains("container"))
+        .map(|prior| serde_json::json!({
+            "item_id": prior["id"], "relation": "same_change", "strength": 0.9,
+            "explanation": "Both report per-container Linux VMs in Apple Container.",
+            "quotes": [quote(&title, "title")]
+        }))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "topic": { "label": "Compute & Infrastructure", "quotes": [quote(&title, "title")] },
+        "subject": { "label": subject, "quotes": [quote(&title, "title")] },
+        "change": { "kind": "adds", "statement": format!("Adds {}", words.iter().skip(2).cloned().collect::<Vec<_>>().join(" ")), "quotes": [quote(&title, "title")] },
+        "why_it_matters": if context_ids.is_empty() { serde_json::Value::Null } else { serde_json::json!({
+            "text": "It may let you drop a custom isolation layer from the runtime you are building.",
+            "context_ids": context_ids, "quotes": [quote(&sentence, "content")] }) },
+        "context_connections": connections,
+        "related_items": related,
+        "claims": [
+            { "basis": "observed", "statement": format!("{subject} runs Linux containers in lightweight VMs."), "rationale": "stated by the source",
+              "confidence": 0.9, "context_ids": [], "item_ids": [], "quotes": [quote(&sentence, "content")] },
+            { "basis": "inferred", "statement": "Per-container VMs may remove the need for a separate isolation layer.", "rationale": "follows from the VM boundary",
+              "confidence": 0.6, "context_ids": context_ids, "item_ids": [], "quotes": [quote(&sentence, "content")] },
+            { "basis": "hypothesis", "statement": "The runtime you are building could drop its sandbox entirely.", "rationale": "if VM isolation holds across platforms",
+              "confidence": 0.3, "context_ids": context_ids, "item_ids": [], "quotes": [] },
+            { "basis": "observed", "statement": "Apple acquired Docker.", "rationale": "fabricated for the evidence gate",
+              "confidence": 0.99, "context_ids": [], "item_ids": [], "quotes": [quote("Apple announced it has acquired Docker", "content")] }
+        ]
+    })
+    .to_string()
+}
+
+fn fake_synthesis(request: &serde_json::Value) -> String {
+    let payload = user_payload(request);
+    let observations = payload["observations"].as_array().cloned().unwrap_or_default();
+    let firsts = observations.iter().filter_map(|o| o["evidence"][0]["id"].as_str().map(ToOwned::to_owned)).collect::<Vec<_>>();
+    serde_json::json!({
+        "agreements": [
+            { "statement": format!("{} sources agree Apple Container runs Linux containers in VMs.", firsts.len()), "basis": "observed", "evidence_ids": firsts },
+            { "statement": "Every analyst agrees this ends Docker.", "basis": "observed", "evidence_ids": ["evidence_that_does_not_exist"] }
+        ],
+        "new_information": [],
+        "differences": [],
+        "uncertainties": [{ "statement": "Whether this ships beyond macOS is unknown.", "basis": "hypothesis", "evidence_ids": [] }]
+    })
+    .to_string()
+}
+
+fn fake_answer(request: &serde_json::Value) -> String {
+    let payload = user_payload(request);
+    let evidence = payload["evidence"].as_array().cloned().unwrap_or_default();
+    let first = evidence.first().and_then(|e| e["id"].as_str()).map(ToOwned::to_owned);
+    let mut statements = Vec::new();
+    if let Some(id) = &first {
+        statements.push(serde_json::json!({ "text": "The sources report per-container Linux VMs in Apple Container.", "basis": "observed", "evidence_ids": [id], "signal_ids": [], "context_ids": [] }));
+        statements.push(serde_json::json!({ "text": "That overlaps with the portable runtime you are building.", "basis": "inferred", "evidence_ids": [id], "signal_ids": [], "context_ids": [] }));
+    }
+    statements.push(serde_json::json!({ "text": "Apple will open-source macOS next year.", "basis": "observed", "evidence_ids": ["evidence_invented"], "signal_ids": [], "context_ids": [] }));
+    statements.push(serde_json::json!({ "text": "You might be able to remove your sandbox layer.", "basis": "hypothesis", "evidence_ids": [], "signal_ids": [], "context_ids": [] }));
+    serde_json::json!({
+        "summary": "Apple Container's per-container VMs overlap with your portable runtime work.",
+        "sufficiency": if first.is_some() { "sufficient" } else { "insufficient" },
+        "statements": statements,
+        "uncertainties": ["Only macOS is covered by the sources."],
+        "follow_ups": ["What evidence supports that?"]
+    })
+    .to_string()
+}
+
+impl FakeModelServer {
+    pub fn start(mode: ModelMode) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake model");
+        let base = format!("http://{}/v1", listener.local_addr().expect("addr"));
+        let mode = Arc::new(Mutex::new(mode));
+        let requests: Arc<Mutex<Vec<serde_json::Value>>> = Default::default();
+        let (shared_mode, shared_requests) = (mode.clone(), requests.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mode = *shared_mode.lock().unwrap();
+                let requests = shared_requests.clone();
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                    let mut line = String::new();
+                    let _ = reader.read_line(&mut line);
+                    let mut length = 0usize;
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                            break;
+                        }
+                        if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                            length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0u8; length];
+                    let _ = reader.read_exact(&mut body);
+                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                    requests.lock().unwrap().push(request.clone());
+                    let schema = request["response_format"]["json_schema"]["name"].as_str().unwrap_or_default().to_owned();
+                    let (status, payload) = match mode {
+                        ModelMode::Failing => (500, "{\"error\":\"model crashed\"}".to_owned()),
+                        ModelMode::Malformed => (200, completion("Sure! This article is about containers and it matters a lot.")),
+                        ModelMode::Cooperative => (200, completion(&match schema.as_str() {
+                            "stream_interpretation" => fake_interpretation(&request),
+                            "stream_synthesis" => fake_synthesis(&request),
+                            "stream_answer" => fake_answer(&request),
+                            _ => "{}".to_owned(),
+                        })),
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(),
+                        payload
+                    );
+                });
+            }
+        });
+        Self { base, mode, requests }
+    }
+
+    pub fn base_url(&self) -> url::Url {
+        url::Url::parse(&self.base).expect("fake model url")
+    }
+
+    pub fn set_mode(&self, mode: ModelMode) {
+        *self.mode.lock().unwrap() = mode;
+    }
+
+    pub fn requests(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    pub fn provider(&self) -> std::sync::Arc<dyn stream_core::ModelProviderHandle> {
+        std::sync::Arc::new(stream_core::OpenAiCompatibleProvider::new(
+            self.base_url(),
+            "fake-model",
+            None,
+            std::time::Duration::from_secs(10),
+        ))
+    }
+}
+
+/// A runtime whose intelligence is backed by the given fake model.
+pub fn model_runtime_at(isolated: &Isolated, model: &FakeModelServer) -> StreamRuntime {
+    runtime_at(isolated).with_model_provider(model.provider())
+}
+
+/// A third independent report of the same change, adding a new detail.
+pub const APPLE_CONTAINER_THIRD_REPORT: &str = r#"<!doctype html>
+<html><head><title>Apple Container gives each Linux container its own VM</title></head>
+<body><article>
+  <p>Apple Container gives every Linux container its own lightweight virtual machine on macOS.</p>
+  <p>The project is open source under the Apache 2.0 license and boots containers in under a second.</p>
+</article></body></html>"#;
+
+/// A report that disputes the change.
+pub const APPLE_CONTAINER_DENIAL: &str = r#"<!doctype html>
+<html><head><title>Apple Container Linux VM support delayed</title></head>
+<body><article>
+  <p>Apple denies that Apple Container runs each Linux container in a lightweight virtual machine yet; the feature was delayed.</p>
+</article></body></html>"#;

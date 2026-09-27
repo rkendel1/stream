@@ -12,8 +12,9 @@ mod intelligence;
 
 pub use canonical::{canonicalize_url, classify_url, CanonicalUrlError};
 pub use intelligence::{
-    slug, Change, ChangeKind, ClaimKind, Connection, ConnectionRelation, ConnectionTargetKind, ContextEntry,
-    ContextKind, Evidence, EvidenceLocator, ProcessingStage, Signal, SignalStatus, Subject, Topic,
+    slug, Change, ChangeKind, ClaimBasis, ClaimKind, Connection, ConnectionRelation, ConnectionTargetKind,
+    ContextEntry, ContextKind, Evidence, EvidenceLocator, Insight, InsightKind, InsightStatus, IntelligenceEvent,
+    ProcessingStage, Signal, SignalClaim, SignalStatus, Subject, Synthesis, SynthesisPoint, Topic,
 };
 
 macro_rules! typed_id {
@@ -65,6 +66,9 @@ typed_id!(ContextId, "context");
 typed_id!(SignalId, "signal");
 typed_id!(EvidenceId, "evidence");
 typed_id!(ConnectionId, "connection");
+typed_id!(ClaimId, "claim");
+typed_id!(InsightId, "insight");
+typed_id!(IntelligenceEventId, "intel_event");
 
 impl SourceId {
     /// A deterministic ID for a canonical identity, so that adding the same

@@ -21,7 +21,6 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 stream-appport = { path = "../stream-appport" }
-tiny_http = "0.12"
 tokio.workspace = true
 uuid.workspace = true
 open = { version = "5", optional = true }

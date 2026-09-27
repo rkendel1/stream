@@ -6,6 +6,7 @@ members = [
   "crates/stream-rss",
   "crates/stream-web",
   "crates/stream-semantic",
+  "crates/stream-reason",
 
   "crates/stream-query",
   "crates/stream-rules",

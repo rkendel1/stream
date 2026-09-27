@@ -8,6 +8,10 @@ use super::{value_datetime, value_datetime_opt, value_string, value_string_opt, 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use stream_model::{
+    ClaimBasis, ClaimId, Insight, InsightId, InsightKind, InsightStatus, IntelligenceEvent, IntelligenceEventId,
+    SignalClaim, Synthesis, SynthesisPoint,
+};
+use stream_model::{
     slug, Change, ChangeKind, ClaimKind, Connection, ConnectionId, ConnectionRelation, ConnectionTargetKind,
     ContextEntry, ContextId, ContextKind, Evidence, EvidenceId, EvidenceLocator, FetchAttempt, FetchAttemptId,
     FetchStatus, ItemId, ItemRelation, ItemRelationId, ProvenanceId, RelationKind, Signal, SignalId, SignalStatus,
@@ -202,6 +206,138 @@ pub(crate) fn item_relation_from_value(value: Value) -> Result<ItemRelation> {
             other => return Err(anyhow!("unsupported item relation: {other}")),
         },
         evidence: value_string_opt(&value, "evidence")?.unwrap_or_default(),
+        created_at: value_datetime(&value, "created_at")?,
+    })
+}
+
+pub(crate) fn claim_record(claim: &SignalClaim) -> Value {
+    json!({
+        "__id": claim.id.as_str(),
+        "signal": claim.signal_id.as_str(),
+        "item": claim.item_id.as_str(),
+        "basis": claim.basis.as_str(),
+        "statement": claim.statement,
+        "confidence": format!("{:.3}", claim.confidence),
+        "rationale": claim.rationale,
+        "evidence": serde_json::to_string(&claim.evidence_ids).unwrap_or_else(|_| "[]".into()),
+        "contexts": serde_json::to_string(&claim.context_ids).unwrap_or_else(|_| "[]".into()),
+        "created_at": claim.created_at.to_rfc3339(),
+    })
+}
+
+pub(crate) fn claim_from_value(value: Value) -> Result<SignalClaim> {
+    Ok(SignalClaim {
+        id: ClaimId::new(value_string(&value, "__id")?),
+        signal_id: SignalId::new(value_string(&value, "signal")?),
+        item_id: ItemId::new(value_string(&value, "item")?),
+        basis: parse_enum(&value, "basis", ClaimBasis::parse)?,
+        statement: value_string(&value, "statement")?,
+        confidence: float(&value, "confidence"),
+        rationale: value_string_opt(&value, "rationale")?.unwrap_or_default(),
+        evidence_ids: json_list(&value, "evidence"),
+        context_ids: json_list(&value, "contexts"),
+        created_at: value_datetime(&value, "created_at")?,
+    })
+}
+
+fn points_text(points: &[SynthesisPoint]) -> String {
+    serde_json::to_string(points).unwrap_or_else(|_| "[]".into())
+}
+
+pub(crate) fn synthesis_id(signal: &SignalId) -> String {
+    format!("synthesis_{}", signal.as_str().trim_start_matches("signal_"))
+}
+
+pub(crate) fn synthesis_record(synthesis: &Synthesis) -> Value {
+    json!({
+        "__id": synthesis_id(&synthesis.signal_id),
+        "signal": synthesis.signal_id.as_str(),
+        "agreements": points_text(&synthesis.agreements),
+        "new_information": points_text(&synthesis.new_information),
+        "differences": points_text(&synthesis.differences),
+        "uncertainties": points_text(&synthesis.uncertainties),
+        "source_count": synthesis.source_count,
+        "observation_count": synthesis.observation_count,
+        "generated_by": synthesis.generated_by,
+        "advisory_state": "advisory",
+        "updated_at": synthesis.updated_at.to_rfc3339(),
+    })
+}
+
+pub(crate) fn synthesis_from_value(value: Value) -> Result<Synthesis> {
+    Ok(Synthesis {
+        signal_id: SignalId::new(value_string(&value, "signal")?),
+        agreements: json_list(&value, "agreements"),
+        new_information: json_list(&value, "new_information"),
+        differences: json_list(&value, "differences"),
+        uncertainties: json_list(&value, "uncertainties"),
+        source_count: value_u64(&value, "source_count").unwrap_or(0) as usize,
+        observation_count: value_u64(&value, "observation_count").unwrap_or(0) as usize,
+        generated_by: value_string_opt(&value, "generated_by")?.unwrap_or_default(),
+        updated_at: value_datetime(&value, "updated_at")?,
+    })
+}
+
+pub(crate) fn insight_record(insight: &Insight) -> Value {
+    json!({
+        "__id": insight.id.as_str(),
+        "kind": insight.kind.as_str(),
+        "status": insight.status.as_str(),
+        "statement": insight.statement,
+        "basis": insight.basis.as_str(),
+        "question": insight.question.clone().unwrap_or_default(),
+        "evidence": serde_json::to_string(&insight.evidence_ids).unwrap_or_else(|_| "[]".into()),
+        "signals": serde_json::to_string(&insight.signal_ids).unwrap_or_else(|_| "[]".into()),
+        "contexts": serde_json::to_string(&insight.context_ids).unwrap_or_else(|_| "[]".into()),
+        "confidence": insight.confidence.map(|c| format!("{c:.3}")).unwrap_or_default(),
+        "uncertainty": insight.uncertainty.clone().unwrap_or_default(),
+        "reasoner": insight.reasoner,
+        "advisory_state": "advisory",
+        "created_at": insight.created_at.to_rfc3339(),
+        "updated_at": insight.updated_at.to_rfc3339(),
+    })
+}
+
+pub(crate) fn insight_from_value(value: Value) -> Result<Insight> {
+    Ok(Insight {
+        id: InsightId::new(value_string(&value, "__id")?),
+        kind: parse_enum(&value, "kind", InsightKind::parse)?,
+        status: parse_enum(&value, "status", InsightStatus::parse)?,
+        statement: value_string(&value, "statement")?,
+        basis: parse_enum(&value, "basis", ClaimBasis::parse)?,
+        question: value_string_opt(&value, "question")?,
+        evidence_ids: json_list(&value, "evidence"),
+        signal_ids: json_list(&value, "signals"),
+        context_ids: json_list(&value, "contexts"),
+        confidence: value_string_opt(&value, "confidence")?.and_then(|c| c.parse().ok()),
+        uncertainty: value_string_opt(&value, "uncertainty")?,
+        model_backed: value_string_opt(&value, "reasoner")?.map(|r| r.contains(".model.")).unwrap_or(false),
+        reasoner: value_string_opt(&value, "reasoner")?.unwrap_or_default(),
+        created_at: value_datetime(&value, "created_at")?,
+        updated_at: value_datetime(&value, "updated_at")?,
+    })
+}
+
+pub(crate) fn event_record(event: &IntelligenceEvent) -> Value {
+    json!({
+        "__id": event.id.as_str(),
+        "operation": event.operation,
+        "status": event.status,
+        "subject_id": event.subject_id.clone().unwrap_or_default(),
+        "detail": event.detail,
+        "provider": event.provider,
+        "created_at": event.created_at.to_rfc3339(),
+    })
+}
+
+pub(crate) fn event_from_value(value: Value) -> Result<IntelligenceEvent> {
+    Ok(IntelligenceEvent {
+        id: IntelligenceEventId::new(value_string(&value, "__id")?),
+        operation: value_string(&value, "operation")?,
+        status: value_string(&value, "status")?,
+        subject_id: value_string_opt(&value, "subject_id")?,
+        detail: value_string_opt(&value, "detail")?.unwrap_or_default(),
+        provider: value_string_opt(&value, "provider")?.unwrap_or_default(),
         created_at: value_datetime(&value, "created_at")?,
     })
 }

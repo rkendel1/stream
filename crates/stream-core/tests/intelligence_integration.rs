@@ -203,8 +203,11 @@ async fn multiple_observations_of_one_change_consolidate_but_keep_their_evidence
         .add_and_observe_url(&server.url("/news/apple-container"), "test", None)
         .await
         .unwrap();
+    // An independent publisher (a different origin) reports the same change.
+    let elsewhere = FixtureServer::start();
+    elsewhere.html("/container-vms", APPLE_CONTAINER_SECOND_REPORT);
     let second = runtime
-        .add_and_observe_url(&server.url("/elsewhere/container-vms"), "test", None)
+        .add_and_observe_url(&elsewhere.url("/container-vms"), "test", None)
         .await
         .unwrap();
     let signal_id = first.primary_signal_id.clone().unwrap();

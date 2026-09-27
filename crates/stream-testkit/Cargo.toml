@@ -11,4 +11,6 @@ stream-core = { path = "../stream-core" }
 stream-ingest = { path = "../stream-ingest" }
 stream-rss = { path = "../stream-rss" }
 stream-web = { path = "../stream-web" }
+serde_json.workspace = true
+url.workspace = true
 uuid.workspace = true
