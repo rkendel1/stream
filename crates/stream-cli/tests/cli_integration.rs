@@ -52,7 +52,7 @@ async fn add_signals_signal_context_and_connections() {
 
     // signal
     let detail = stream(&port, &["signal", &id]).await;
-    for expected in ["Topic    Compute & Infrastructure", "Subject  Apple Container", "Change   Adds portable Linux VMs", "Why it matters", "Why is this here?  #", "Relationship to your context", "change, subject, topic] “", "source  source_"] {
+    for expected in ["Topic    Compute & Infrastructure", "Subject  Apple Container", "Change   Adds portable Linux VMs", "Why it matters", "Why is this here?  #", "Relationship to your context", "change, subject, topic, statement] “", "Claims (observed", "  observed    Apple Container: Adds portable Linux VMs.", "source  source_"] {
         assert!(detail.contains(expected), "missing {expected:?} in\n{detail}");
     }
 
@@ -97,4 +97,32 @@ async fn failed_urls_stay_visible() {
     assert!(output.contains("Stage    failed"), "{output}");
     assert!(output.contains("stream source observe"), "{output}");
     assert!(stream(&port, &["sources"]).await.contains("\tfailed\t"));
+}
+
+#[tokio::test]
+async fn ask_insights_and_doctor() {
+    let server = FixtureServer::start();
+    let article = server.html("/news/apple-container", APPLE_CONTAINER_ARTICLE);
+    server.route("/news/feed.xml", "application/rss+xml", NEWS_FEED);
+    let isolated = Isolated::new();
+    let port = StreamAppPort::new(runtime_at(&isolated));
+    stream(&port, &["context", "add", "Portable compute", "-d", "Running workloads anywhere"]).await;
+    stream(&port, &["add", &article]).await;
+
+    let answer = stream(&port, &["ask", "Why does this matter to portable compute?", "--save", "insight"]).await;
+    for expected in ["observed", "connected", "inferred", "[1]", "Evidence\n  [1] “", "Connected to: Portable compute", "Saved insight insight_"] {
+        assert!(answer.contains(expected), "missing {expected:?} in\n{answer}");
+    }
+    let id = answer.split_whitespace().find(|w| w.starts_with("insight_")).unwrap().to_owned();
+    assert!(stream(&port, &["insights"]).await.contains(&id));
+    let detail = stream(&port, &["insight", &id]).await;
+    assert!(detail.contains("From the question: Why does this matter to portable compute?"), "{detail}");
+    assert!(detail.contains("Evidence “"), "{detail}");
+    assert!(stream(&port, &["insight", &id, "--resolve"]).await.ends_with("resolved"));
+
+    let unknown = stream(&port, &["ask", "What do we know about quantum biology?"]).await;
+    assert!(unknown.contains("don't have enough evidence") && unknown.contains("(Insufficient evidence.)"), "{unknown}");
+
+    let doctor = stream(&port, &["doctor"]).await;
+    assert!(doctor.contains("- intelligence: local"), "{doctor}");
 }

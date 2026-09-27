@@ -14,12 +14,18 @@ use stream_model::{
     ProcessingStage, RuleExecutionResult, RuleId, Source, SourceId, SourceKind, SourceStatus,
 };
 use stream_rules::rule_matches;
-use stream_semantic::{HeuristicInterpreter, Interpreter};
+use stream_reason::{LocalReasoner, LocalSynthesizer, ModelReasoner, ModelSynthesizer, Reasoner, Synthesizer};
+use stream_semantic::{HeuristicInterpreter, Interpreter, ModelInterpreter, ModelProvider};
 
 mod intelligence;
+mod reasoning;
 mod records;
 
 pub use intelligence::*;
+pub use reasoning::*;
+/// Provider types, re-exported so runtime hosts can configure a model
+/// without depending on the semantic crate directly.
+pub use stream_semantic::{ModelProvider as ModelProviderHandle, OpenAiCompatibleProvider, ProviderConfig};
 
 /// The FeltDB bridge: one long-lived Node process speaking JSON lines.
 ///
@@ -281,6 +287,12 @@ pub struct StreamRuntime {
     fetcher: HttpFetcher,
     adapters: AdapterRegistry,
     interpreter: std::sync::Arc<dyn Interpreter>,
+    /// Used when the primary interpreter fails or its proposal is refused.
+    fallback_interpreter: Option<std::sync::Arc<dyn Interpreter>>,
+    synthesizer: std::sync::Arc<dyn Synthesizer>,
+    fallback_synthesizer: Option<std::sync::Arc<dyn Synthesizer>>,
+    reasoner: std::sync::Arc<dyn Reasoner>,
+    fallback_reasoner: Option<std::sync::Arc<dyn Reasoner>>,
 }
 
 impl StreamRuntime {
@@ -290,6 +302,11 @@ impl StreamRuntime {
             fetcher: HttpFetcher::default(),
             adapters,
             interpreter: std::sync::Arc::new(HeuristicInterpreter),
+            fallback_interpreter: None,
+            synthesizer: std::sync::Arc::new(LocalSynthesizer),
+            fallback_synthesizer: None,
+            reasoner: std::sync::Arc::new(LocalReasoner),
+            fallback_reasoner: None,
         }
     }
 
@@ -298,6 +315,33 @@ impl StreamRuntime {
     pub fn with_interpreter(mut self, interpreter: std::sync::Arc<dyn Interpreter>) -> Self {
         self.interpreter = interpreter;
         self
+    }
+
+    /// Use a model for interpretation, synthesis, and reasoning. The local,
+    /// deterministic implementations remain as fallbacks, so Stream keeps
+    /// working — and says so durably — when the model is unavailable.
+    pub fn with_model_provider(mut self, provider: std::sync::Arc<dyn ModelProvider>) -> Self {
+        self.interpreter = std::sync::Arc::new(ModelInterpreter::new(provider.clone()));
+        self.fallback_interpreter = Some(std::sync::Arc::new(HeuristicInterpreter));
+        self.synthesizer = std::sync::Arc::new(ModelSynthesizer::new(provider.clone()));
+        self.fallback_synthesizer = Some(std::sync::Arc::new(LocalSynthesizer));
+        self.reasoner = std::sync::Arc::new(ModelReasoner::new(provider));
+        self.fallback_reasoner = Some(std::sync::Arc::new(LocalReasoner));
+        self
+    }
+
+    pub fn with_reasoner(mut self, reasoner: std::sync::Arc<dyn Reasoner>) -> Self {
+        self.reasoner = reasoner;
+        self
+    }
+
+    /// True when a model backs the intelligence layer (for diagnostics only).
+    pub fn model_backed(&self) -> bool {
+        self.fallback_interpreter.is_some()
+    }
+
+    pub fn interpreter_id(&self) -> &str {
+        self.interpreter.id()
     }
 
     pub fn store(&self) -> &FeltDbStore {

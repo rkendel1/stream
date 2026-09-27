@@ -112,17 +112,25 @@ const state = {
   jobs: new Map(),
   fresh: null,
   loaded: false,
+  insights: [],
+  // The conversation lives only here, in memory. It is an interface to
+  // Stream, not a store: closing the window forgets it; Stream remembers
+  // only what the user explicitly saves as an insight.
+  chat: { turns: [], focus: null },
 };
+
+const TITLES = { signals: 'Today', chat: 'Ask Stream', sources: 'Sources', connections: 'Connections' };
 
 async function refresh() {
   try {
-    const [signals, sources, graph, contexts] = await Promise.all([
+    const [signals, sources, graph, contexts, insights] = await Promise.all([
       call('stream.signal.list'),
       call('stream.source.list'),
       call('stream.connection.graph'),
       call('stream.context.list'),
+      call('stream.insight.list'),
     ]);
-    Object.assign(state, { signals, sources, graph, contexts, loaded: true });
+    Object.assign(state, { signals, sources, graph, contexts, insights, loaded: true });
   } catch (error) {
     toast(`Could not reach Stream: ${error.message}`);
   }
@@ -228,6 +236,9 @@ function renderJobs() {
         outcome.failed ? h('button', { class: 'ghost', type: 'button', onclick: () => observe(job) }, 'Retry') : null,
         job.report && job.report.primary_signal_id
           ? h('button', { class: 'link', type: 'button', onclick: () => openSignal(job.report.primary_signal_id) }, 'View signal')
+          : null,
+        job.report && job.report.primary_signal_id
+          ? h('button', { class: 'ghost', type: 'button', onclick: () => askStream('Why does this matter to me?', { signal_ids: [job.report.primary_signal_id] }, job.source.title) }, 'Ask why this matters to me')
           : null) : null);
     container.append(card);
   }
@@ -239,6 +250,7 @@ function render() {
   for (const tab of document.querySelectorAll('[data-tab]')) {
     tab.setAttribute('aria-selected', String(tab.dataset.tab === state.tab));
   }
+  $('#view-title').textContent = TITLES[state.tab];
   const view = $('#view');
   view.replaceChildren();
   if (!state.loaded) {
@@ -246,6 +258,7 @@ function render() {
     return;
   }
   if (state.tab === 'signals') view.append(...renderSignals());
+  if (state.tab === 'chat') view.append(...renderChat());
   if (state.tab === 'sources') view.append(...renderSources());
   if (state.tab === 'connections') view.append(...renderConnections());
 }
@@ -294,6 +307,7 @@ function signalCard(summary) {
       h('button', { class: 'link', type: 'button', onclick: () => openSignal(signal.id, 'evidence') },
         `${plural(summary.source_count, 'source')} · View evidence`),
       h('button', { class: 'link', type: 'button', onclick: () => openSignal(signal.id, 'ranking') }, 'Why here?'),
+      askMenu({ signal_ids: [signal.id] }, signal.subject.label),
       h('span', { class: 'spacer' }),
       h('button', { class: 'subtle', type: 'button', title: 'Resolved — remove from Today', onclick: () => setStatus(signal.id, 'resolve') }, 'Done'),
       h('button', { class: 'subtle', type: 'button', title: 'Not useful — remove from Today', onclick: () => setStatus(signal.id, 'dismiss') }, 'Dismiss')),
@@ -331,7 +345,9 @@ function renderSources() {
       source.stage === 'failed'
         ? h('div', { class: 'source-error' }, h('span', null, source.stage_detail || source.last_error_message || 'Observation failed'),
             h('button', { class: 'ghost', type: 'button', onclick: () => { state.jobs.set(source.id, job); observe(job); } }, 'Retry'))
-        : h('div', null, h('button', { class: 'subtle', type: 'button', onclick: () => { state.jobs.set(source.id, job); observe(job); } }, 'Observe now')));
+        : h('div', null,
+            h('button', { class: 'subtle', type: 'button', onclick: () => askStream('Why does this matter to me?', { source_ids: [source.id] }, source.title || host(source.canonical_url)) }, 'Ask why this matters'),
+            h('button', { class: 'subtle', type: 'button', onclick: () => { state.jobs.set(source.id, job); observe(job); } }, 'Observe now')));
   });
 }
 
@@ -348,7 +364,9 @@ function renderConnections() {
     const direct = node.signals.filter((s) => s.relation !== 'via');
     const indirect = node.signals.filter((s) => s.relation === 'via');
     nodes.push(h('div', { class: 'node' },
-      h('h3', null, node.context.name, h('span', { class: 'kind' }, node.context.kind)),
+      h('h3', null, node.context.name, h('span', { class: 'kind' }, node.context.kind),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'subtle', type: 'button', onclick: () => askStream(`What have we learned about ${node.context.name}?`, { context_ids: [node.context.id] }, node.context.name) }, 'Ask what we’ve learned')),
       node.context.description ? h('p', { class: 'desc' }, node.context.description) : null,
       node.related.length ? h('div', { class: 'chips' }, node.related.map((r) => h('span', { class: 'chip via' }, `↔ ${r.label}`))) : null,
       node.signals.length
@@ -356,6 +374,10 @@ function renderConnections() {
             direct.map((s) => h('li', null, h('button', { class: 'link', type: 'button', onclick: () => openSignal(s.id) }, s.subject), ` — ${s.change}`)),
             indirect.map((s) => h('li', { class: 'indirect' }, h('button', { class: 'link', type: 'button', onclick: () => openSignal(s.id) }, s.subject), ` — ${s.change} (through a related context)`)))
         : h('p', { class: 'muted small' }, 'Nothing observed about this yet.')));
+  }
+  if (state.insights.length) {
+    nodes.push(h('div', { class: 'group-title' }, 'Saved reasoning'));
+    nodes.push(...state.insights.map(insightCard));
   }
   const converging = graph.subjects.filter((s) => s.observation_count > 1);
   if (converging.length) {
@@ -462,10 +484,26 @@ async function openSignal(id, focus) {
         h('h2', null, signal.subject.label),
         h('p', { class: 'change' }, signal.change.statement)),
       h('button', { class: 'subtle', type: 'button', 'aria-label': 'Close', onclick: closeDrawer }, '✕')),
+    h('div', { class: 'drawer-ask' }, askMenu({ signal_ids: [signal.id] }, signal.subject.label, true)),
     h('section', null,
       h('h3', null, 'Why does Stream think this matters?'),
       h('p', null, signal.why_it_matters || 'It isn’t connected to anything you’ve told Stream you care about yet. Add context and Stream will re-evaluate it.'),
+      signal.why_it_matters ? h('p', { class: 'muted small' }, 'This is Stream’s inference from your context, not something a source states.') : null,
       summary.connected_to.length ? h('div', { class: 'chips' }, summary.connected_to.map(chip)) : null),
+    detail.claims.length ? h('section', null,
+      h('h3', null, 'What Stream observed, and what it infers'),
+      detail.claims.map((claim) => h('div', { class: `claim-row basis-${claim.basis}` },
+        basisBadge(claim.basis),
+        h('span', null, claim.statement),
+        claim.evidence_ids.length ? h('span', { class: 'muted small' }, ` · ${plural(claim.evidence_ids.length, 'excerpt')}`) : null))) : null,
+    detail.synthesis ? h('section', null,
+      h('h3', null, `Across ${plural(detail.synthesis.observation_count, 'observation')} from ${plural(detail.synthesis.source_count, 'source')}`),
+      [['Agree', detail.synthesis.agreements], ['New', detail.synthesis.new_information], ['Differ', detail.synthesis.differences], ['Uncertain', detail.synthesis.uncertainties]]
+        .filter(([, points]) => points.length)
+        .map(([label, points]) => h('div', { class: 'synthesis-group' },
+          h('div', { class: 'claim-label' }, label),
+          points.map((point) => h('div', { class: `claim-row basis-${point.basis}` }, basisBadge(point.basis), h('span', null, point.statement)))))) : null,
+    detail.insights.length ? h('section', null, h('h3', null, 'Your saved reasoning'), detail.insights.map(insightCard)) : null,
     h('section', { id: 'drawer-evidence' },
       h('h3', null, `Evidence · ${plural(groups.length, 'excerpt')} from ${plural(detail.observations.length, 'observation')}`),
       groups.map(evidenceGroup)),
@@ -493,6 +531,220 @@ async function openSignal(id, focus) {
   const target = focus && document.getElementById(`drawer-${focus}`);
   if (target) target.scrollIntoView({ block: 'start' });
   drawer.focus();
+}
+
+// ---------------------------------------------------------------- chat
+
+const BASIS_LABEL = { observed: 'Observed', connected: 'Connected', inferred: 'Inferred', hypothesis: 'Hypothesis' };
+const BASIS_HINT = {
+  observed: 'Stated by a source — see the quoted evidence',
+  connected: 'A relationship to your context or to other signals, backed by evidence',
+  inferred: 'Stream’s conclusion from the evidence — not stated by a source',
+  hypothesis: 'A possibility worth investigating — not established',
+};
+const ASK_PRESETS = [
+  'Why does this matter?',
+  'What changed?',
+  'What does this connect to?',
+  'What else supports this?',
+  'What contradicts this?',
+  'What should we investigate?',
+];
+
+function basisBadge(basis) {
+  return h('span', { class: `basis basis-${basis}`, title: BASIS_HINT[basis] }, BASIS_LABEL[basis] || basis);
+}
+
+// "Ask Stream" from anything: preset questions, retrieval constrained to it.
+function askMenu(focus, label, open) {
+  return h('details', { class: 'ask-menu', open: open || false },
+    h('summary', null, 'Ask Stream'),
+    h('div', { class: 'ask-options' },
+      ASK_PRESETS.map((question) => h('button', { class: 'chip toggle', type: 'button', onclick: (event) => {
+        event.currentTarget.closest('details').open = false;
+        askStream(question, focus, label);
+      } }, question))));
+}
+
+function askStream(question, focus, label) {
+  closeDrawer();
+  state.chat.focus = focus ? { focus, label } : state.chat.focus;
+  state.tab = 'chat';
+  send(question);
+}
+
+async function send(question) {
+  question = question.trim();
+  if (!question) return;
+  const history = state.chat.turns
+    .filter((turn) => turn.answer)
+    .slice(-3)
+    .map((turn) => ({ question: turn.question, signal_ids: turn.answer.signals.map((s) => s.id) }));
+  const turn = { question, focus: state.chat.focus, answer: null, error: null };
+  state.chat.turns.push(turn);
+  render();
+  try {
+    turn.answer = await call('stream.chat.ask', { question, focus: turn.focus ? turn.focus.focus : {}, history });
+  } catch (error) {
+    turn.error = error.message;
+  }
+  render();
+  const answers = document.querySelectorAll('.turn');
+  if (answers.length) answers[answers.length - 1].scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function suggestions() {
+  const out = [];
+  for (const view of state.contexts.slice(0, 2)) out.push(`What have we learned about ${view.context.name}?`);
+  if (state.contexts.some((v) => v.context.kind === 'project')) out.push('Which recent developments connect to the things I’m building?');
+  out.push('What changed recently?', 'What patterns are appearing across these sources?', 'What remains uncertain?', 'What should I investigate further?');
+  return out;
+}
+
+function renderChat() {
+  const nodes = [];
+  const focus = state.chat.focus;
+  const form = h('form', { class: 'ask-form', onsubmit: (event) => {
+    event.preventDefault();
+    const input = event.currentTarget.querySelector('input');
+    const question = input.value;
+    input.value = '';
+    send(question);
+  } },
+    h('input', { type: 'text', name: 'question', placeholder: focus ? `Ask about ${focus.label}…` : 'Ask what Stream knows…', autocomplete: 'off', 'aria-label': 'Question' }),
+    h('button', { class: 'primary', type: 'submit' }, 'Ask'));
+  nodes.push(form);
+  nodes.push(h('div', { class: 'ask-meta' },
+    focus
+      ? h('span', { class: 'chip scope' }, `Scope: ${focus.label}`, h('button', { class: 'chip-x', type: 'button', 'aria-label': 'Ask about everything', onclick: () => { state.chat.focus = null; render(); } }, '✕'))
+      : h('span', { class: 'muted small' }, 'Scope: everything Stream knows'),
+    state.chat.turns.length ? h('button', { class: 'subtle', type: 'button', onclick: () => { state.chat = { turns: [], focus: null }; render(); } }, 'New conversation') : null));
+
+  if (!state.chat.turns.length) {
+    nodes.push(h('div', { class: 'chat-intro' },
+      h('p', null, 'Ask what Stream knows. Answers come from your sources and context, cite the evidence they rest on, and say plainly when Stream doesn’t know.'),
+      h('div', { class: 'chips' }, suggestions().map((q) => h('button', { class: 'chip toggle', type: 'button', onclick: () => send(q) }, q)))));
+  }
+  for (const turn of state.chat.turns) {
+    nodes.push(h('div', { class: 'turn' },
+      h('div', { class: 'question' }, turn.question, turn.focus ? h('span', { class: 'muted small' }, ` — about ${turn.focus.label}`) : null),
+      turn.error ? h('div', { class: 'answer failed' }, turn.error)
+        : turn.answer ? answerCard(turn.answer)
+        : h('div', { class: 'answer pending' }, 'Stream is looking through what it knows…')));
+  }
+  return nodes;
+}
+
+function evidenceList(traces) {
+  return h('div', { class: 'evidence-list' }, traces.map((trace) => evidenceGroup({ trace, claims: [trace.evidence.claim] })));
+}
+
+function answerCard(answer) {
+  const traceById = new Map(answer.evidence.map((trace) => [trace.evidence.id, trace]));
+  const card = h('div', { class: `answer sufficiency-${answer.sufficiency}` });
+  card.append(h('p', { class: 'answer-summary' }, answer.summary));
+  if (answer.sufficiency === 'partial') {
+    card.append(h('p', { class: 'answer-banner' }, 'Stream’s evidence only partly answers this.'));
+  }
+  if (answer.statements.length) {
+    card.append(h('ol', { class: 'statements' }, answer.statements.map((statement) => {
+      const traces = statement.evidence_ids.map((id) => traceById.get(id)).filter(Boolean);
+      const row = h('li', { class: `statement basis-${statement.basis}` },
+        basisBadge(statement.basis),
+        h('span', { class: 'statement-text' }, statement.text));
+      if (traces.length) {
+        const details = h('details', { class: 'statement-evidence' },
+          h('summary', null, `${plural(new Set(traces.map((t) => t.source && t.source.id)).size, 'source')} · ${plural(traces.length, 'excerpt')}`),
+          evidenceList(traces));
+        row.append(details);
+      }
+      return row;
+    })));
+  }
+  if (answer.uncertainties.length) {
+    card.append(h('div', { class: 'answer-section' },
+      h('div', { class: 'claim-label' }, 'Uncertain'),
+      h('ul', { class: 'uncertain' }, answer.uncertainties.map((u) => h('li', null, u)))));
+  }
+  if (answer.connected_to.length) {
+    card.append(h('div', { class: 'answer-section' },
+      h('div', { class: 'claim-label' }, 'Connected to'),
+      h('div', { class: 'chips' }, answer.connected_to.map(chip))));
+  }
+  const sources = h('div', { class: 'answer-sources', hidden: true }, evidenceList(answer.evidence));
+  const saveSlot = h('div');
+  card.append(h('div', { class: 'answer-foot' },
+    answer.evidence.length
+      ? h('button', { class: 'link', type: 'button', onclick: () => (sources.hidden = !sources.hidden) },
+          `Evidence · ${plural(answer.sources.length, 'source')} · View sources`)
+      : h('span', { class: 'muted small' }, 'No evidence cited'),
+    answer.signals.map((s) => h('button', { class: 'link', type: 'button', onclick: () => openSignal(s.id) }, s.subject)),
+    h('span', { class: 'spacer' }),
+    answer.statements.length ? h('button', { class: 'ghost', type: 'button', onclick: () => {
+      saveSlot.replaceChildren(saveInsightForm(answer, () => saveSlot.replaceChildren()));
+    } }, 'Save insight') : null));
+  card.append(sources, saveSlot);
+  if (answer.follow_ups.length) {
+    card.append(h('div', { class: 'chips follow-ups' }, answer.follow_ups.map((q) => h('button', { class: 'chip toggle', type: 'button', onclick: () => send(q) }, q))));
+  }
+  card.append(h('p', { class: 'muted small retrieved' },
+    `Stream looked at ${plural(answer.retrieved.signal_ids.length, 'signal')} and ${plural(answer.retrieved.evidence_count, 'evidence excerpt')}${answer.retrieved.focused ? ' you pointed at' : ''}. Nothing else informs this answer.`));
+  for (const notice of answer.notices) card.append(h('p', { class: 'notice' }, notice));
+  return card;
+}
+
+function saveInsightForm(answer, done) {
+  const preferred = answer.statements.find((s) => s.basis === 'inferred') || answer.statements[0];
+  const cited = [...new Set(answer.statements.flatMap((s) => s.evidence_ids))];
+  const form = h('form', { class: 'save-insight', onsubmit: async (event) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    try {
+      const kind = data.get('kind');
+      await call('stream.insight.save', {
+        kind,
+        statement: data.get('statement'),
+        question: answer.question,
+        evidence_ids: cited,
+        context_ids: preferred.context_ids,
+        uncertainty: answer.uncertainties[0] || null,
+      });
+      toast('Saved to Stream as advisory knowledge, with its evidence.');
+      done();
+      refresh();
+    } catch (error) {
+      toast(error.message);
+    }
+  } },
+    h('label', { class: 'claim-label' }, 'Save to Stream'),
+    h('textarea', { name: 'statement', rows: '3', required: true }, preferred.text),
+    h('div', { class: 'composer-row' },
+      h('select', { name: 'kind', 'aria-label': 'Kind' },
+        [['insight', 'Insight'], ['hypothesis', 'Hypothesis'], ['question', 'Open question'], ['investigation', 'Investigation'], ['decision_candidate', 'Decision candidate']]
+          .map(([value, label]) => h('option', { value }, label))),
+      h('span', { class: 'muted small' }, `cites ${plural(cited.length, 'excerpt')}`),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'ghost', type: 'button', onclick: done }, 'Cancel'),
+      h('button', { class: 'primary', type: 'submit' }, 'Save')));
+  return form;
+}
+
+const INSIGHT_LABEL = { insight: 'Insight', hypothesis: 'Hypothesis', question: 'Open question', investigation: 'Investigation', decision_candidate: 'Decision candidate' };
+
+function insightCard(insight) {
+  return h('div', { class: `node insight status-${insight.status}` },
+    h('div', { class: 'insight-head' },
+      h('span', { class: 'eyebrow' }, INSIGHT_LABEL[insight.kind] || insight.kind),
+      basisBadge(insight.basis),
+      insight.status !== 'open' ? h('span', { class: 'muted small' }, insight.status) : null,
+      h('span', { class: 'spacer' }),
+      insight.status === 'open' ? h('button', { class: 'subtle', type: 'button', onclick: async () => {
+        await call('stream.insight.resolve', { id: insight.id });
+        refresh();
+      } }, 'Resolve') : null),
+    h('p', null, insight.statement),
+    insight.question ? h('p', { class: 'muted small' }, `From: “${insight.question}”`) : null,
+    h('p', { class: 'muted small' }, `${plural(insight.evidence_ids.length, 'excerpt')} of evidence · saved ${ago(insight.created_at)} · advisory`));
 }
 
 // ---------------------------------------------------------------- forms

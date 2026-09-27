@@ -229,6 +229,75 @@ blockquote {
   background: var(--ink); color: var(--bg); padding: 8px 16px; border-radius: 8px; font-size: 14px;
 }
 
+/* Basis: fact vs. reasoning, always visible */
+.spacer { flex: 1; }
+.basis {
+  display: inline-block; flex: none; font-size: 11px; font-weight: 600; letter-spacing: .03em;
+  padding: 1px 7px; border-radius: 999px; margin-right: 8px; vertical-align: 1px;
+  border: 1px solid var(--line); color: var(--muted); background: var(--surface);
+}
+.basis-observed.basis, .basis.basis-observed { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); }
+.basis.basis-connected { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.basis.basis-inferred { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); font-style: italic; }
+.basis.basis-hypothesis { color: var(--muted); border-style: dashed; font-style: italic; }
+.claim-row { display: flex; align-items: baseline; gap: 2px; font-size: 14px; margin-bottom: 6px; }
+.claim-row.basis-inferred > span:nth-child(2), .claim-row.basis-hypothesis > span:nth-child(2) { color: var(--ink-2); font-style: italic; }
+.synthesis-group { margin-bottom: 10px; }
+
+/* Ask Stream */
+.ask-menu { position: relative; }
+.ask-menu > summary { list-style: none; cursor: pointer; color: var(--accent); font-weight: 500; font-size: 14px; }
+.ask-menu > summary::-webkit-details-marker { display: none; }
+.ask-menu > summary::before { content: "✦ "; }
+.ask-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.signal-foot .ask-menu[open] { flex-basis: 100%; order: 10; }
+.drawer-ask { margin-top: 10px; }
+.chip.scope { background: var(--accent-soft); gap: 4px; }
+.chip-x { padding: 0 2px; font-size: 11px; color: var(--muted); }
+
+/* Chat */
+.ask-form { display: flex; gap: 8px; margin-bottom: 8px; }
+.ask-form input {
+  flex: 1; min-width: 0; padding: 10px 14px; font-size: 15px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+}
+.ask-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 16px; min-height: 28px; }
+.chat-intro { color: var(--ink-2); padding: 8px 0 16px; }
+.chat-intro p { margin: 0 0 12px; }
+.turn { margin-bottom: 22px; scroll-margin-top: 80px; }
+.question {
+  margin: 0 0 8px auto; width: fit-content; max-width: 85%;
+  background: var(--accent); color: var(--accent-ink); padding: 8px 14px; border-radius: 14px 14px 4px 14px; font-weight: 500;
+}
+.answer {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 16px 18px;
+}
+.answer.pending { color: var(--muted); }
+.answer.failed { color: var(--bad); background: var(--bad-soft); }
+.answer-summary { margin: 0 0 10px; font-size: 16px; font-weight: 600; }
+.sufficiency-insufficient .answer-summary { color: var(--bad); }
+.answer-banner { margin: 0 0 10px; padding: 6px 10px; border-radius: 8px; background: var(--surface-2); color: var(--ink-2); font-size: 14px; }
+.sufficiency-insufficient .answer-banner { background: var(--bad-soft); color: var(--bad); }
+.statements { margin: 0 0 8px; padding-left: 20px; display: grid; gap: 8px; }
+.statement { font-size: 15px; }
+.statement.basis-inferred .statement-text, .statement.basis-hypothesis .statement-text { font-style: italic; color: var(--ink-2); }
+.statement-evidence > summary { cursor: pointer; font-size: 12px; color: var(--accent); margin-top: 2px; }
+.evidence-list { margin-top: 6px; }
+.answer-section { margin-top: 12px; }
+.uncertain { margin: 4px 0 0; padding-left: 18px; font-size: 14px; color: var(--ink-2); }
+.answer-foot { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; font-size: 14px; }
+.answer-sources { margin-top: 10px; }
+.follow-ups { margin-top: 12px; }
+.retrieved { margin: 10px 0 0; }
+.notice { margin: 6px 0 0; font-size: 13px; color: var(--warn); }
+.save-insight { display: grid; gap: 8px; margin-top: 12px; padding: 12px; background: var(--surface-2); border-radius: 10px; }
+.save-insight textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); resize: vertical; }
+.save-insight select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.insight-head { display: flex; align-items: center; gap: 8px; }
+.node.insight p { margin: 6px 0 0; }
+.node.insight.status-resolved, .node.insight.status-dropped { opacity: .7; }
+
 @media (max-width: 560px) {
   .bar { padding: 10px 16px; }
   .shell { padding: 16px 16px 64px; }

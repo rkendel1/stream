@@ -149,3 +149,53 @@ async fn every_manifest_capability_is_invokable() {
         }
     }
 }
+
+#[tokio::test]
+async fn chat_reasoning_and_insights_work_through_appport_without_exposing_the_provider() {
+    let server = web();
+    let model = stream_testkit::FakeModelServer::start(stream_testkit::ModelMode::Cooperative);
+    let isolated = Isolated::new();
+    let port = StreamAppPort::new(stream_testkit::model_runtime_at(&isolated, &model));
+    ok(&port, "stream.context.add", json!({ "name": "Portable compute", "description": "Running workloads anywhere" })).await;
+    ok(&port, "stream.source.add", json!({ "url": server.url("/news/apple-container") })).await;
+
+    let bundle = ok(&port, "stream.reason.retrieve", json!({ "question": "What connects to portable compute?" })).await;
+    assert!(!bundle["signals"].as_array().unwrap().is_empty());
+    assert!(!bundle["evidence"].as_array().unwrap().is_empty());
+
+    let answer = ok(&port, "stream.chat.ask", json!({ "question": "What connects to portable compute?" })).await;
+    let statements = answer["statements"].as_array().unwrap();
+    assert!(!statements.is_empty());
+    for statement in statements {
+        if statement["basis"] != "hypothesis" {
+            assert!(!statement["evidence_ids"].as_array().unwrap().is_empty(), "{statement}");
+        }
+    }
+    assert!(!answer["evidence"].as_array().unwrap().is_empty(), "answers carry provenance");
+    assert!(!answer["sources"].as_array().unwrap().is_empty());
+
+    let evidence_id = answer["evidence"][0]["evidence"]["id"].clone();
+    let insight = ok(
+        &port,
+        "stream.insight.save",
+        json!({ "kind": "insight", "statement": "Per-container VMs overlap with portable compute.", "question": "What connects to portable compute?", "evidence_ids": [evidence_id] }),
+    )
+    .await;
+    assert_eq!(insight["basis"], "inferred");
+    let listed = ok(&port, "stream.insight.list", json!({})).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let fetched = ok(&port, "stream.insight.get", json!({ "id": insight["id"] })).await;
+    assert!(!fetched["evidence"].as_array().unwrap().is_empty());
+    ok(&port, "stream.insight.resolve", json!({ "id": insight["id"] })).await;
+
+    let bad = port.invoke("stream.insight.save", json!({ "kind": "insight", "statement": "Unsupported.", "evidence_ids": [] })).await.unwrap_err();
+    assert_eq!(bad.code, ErrorCode::InvalidInput);
+    let empty = port.invoke("stream.chat.ask", json!({ "question": "  " })).await.unwrap_err();
+    assert_eq!(empty.code, ErrorCode::InvalidInput);
+
+    let status = ok(&port, "stream.intelligence.status", json!({})).await;
+    assert_eq!(status["model_backed"], true);
+    for payload in [answer.to_string(), bundle.to_string(), status.to_string(), fetched.to_string()] {
+        assert!(!payload.contains("fake-model"), "AppPort exposes Stream's capability, not the provider");
+    }
+}

@@ -19,6 +19,7 @@ stream-appport = { path = "../stream-appport" }
 stream-core = { path = "../stream-core" }
 stream-model = { path = "../stream-model" }
 stream-query = { path = "../stream-query" }
+stream-reason = { path = "../stream-reason" }
 
 [dev-dependencies]
 stream-testkit = { path = "../stream-testkit" }

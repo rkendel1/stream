@@ -9,9 +9,9 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use stream_core::{FeltDbConfig, FeltDbStore, NewContext, SearchQuery, StreamRuntime};
+use stream_core::{AskRequest, FeltDbConfig, FeltDbStore, NewContext, NewInsight, ProviderConfig, SearchQuery, StreamRuntime};
 use stream_ingest::AdapterRegistry;
-use stream_model::{AttentionEventId, EvidenceId, ItemId, SignalId, SignalStatus, SourceId, SourceKind};
+use stream_model::{AttentionEventId, EvidenceId, InsightId, InsightStatus, ItemId, SignalId, SignalStatus, SourceId, SourceKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +82,15 @@ impl AppPortManifest {
                 capability("stream.context.add", Consequential, "Add or refine durable user context; existing signals are re-evaluated against it.", &["invoke"]),
                 capability("stream.connection.list", Observation, "Connections touching a signal, item, or context (or all).", &["invoke"]),
                 capability("stream.connection.graph", Observation, "The information graph: contexts, subjects, and related observations.", &["invoke"]),
+                // Reasoning over Stream: grounded answers with provenance.
+                capability("stream.chat.ask", Observation, "Ask Stream a question. Answers are grounded in retrieved Stream evidence, label observed/inferred/connected/hypothesis, and say when evidence is insufficient. Optional focus constrains retrieval.", &["invoke"]),
+                capability("stream.reason.retrieve", Observation, "The evidence/context bundle Stream would reason over for a question.", &["invoke"]),
+                capability("stream.insight.save", Consequential, "Save reasoning (insight, hypothesis, question, decision candidate, investigation) as durable, advisory Stream knowledge, citing evidence.", &["invoke"]),
+                capability("stream.insight.list", Observation, "Saved reasoning, newest first; optionally for one signal.", &["invoke"]),
+                capability("stream.insight.get", Observation, "A saved insight with its evidence traced to sources.", &["invoke"]),
+                capability("stream.insight.resolve", Consequential, "Mark an insight resolved.", &["invoke"]),
+                capability("stream.insight.drop", Consequential, "Drop an insight; it stays durable but no longer counts as open.", &["invoke"]),
+                capability("stream.intelligence.status", Observation, "Whether a model backs Stream's intelligence, and recent failures, refusals, and fallbacks.", &["invoke"]),
                 // Grouped capabilities from the original runtime surface.
                 capability("stream.source", Consequential, "Manage Stream sources.", &["create", "list", "get", "refresh", "pause", "resume"]),
                 capability("stream.item", Consequential, "Read and mutate Stream item state.", &["get", "state", "mark_read", "save", "dismiss", "mark_important", "archive"]),
@@ -171,6 +180,12 @@ struct SignalListInput {
 }
 
 #[derive(Deserialize, Default)]
+struct InsightListInput {
+    #[serde(default)]
+    signal_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
 struct ConnectionListInput {
     #[serde(default)]
     id: Option<String>,
@@ -228,8 +243,19 @@ pub fn default_adapters() -> AdapterRegistry {
     AdapterRegistry::new(adapters)
 }
 
+/// Build the runtime for a Stream root. A model provider is used when one is
+/// configured (`STREAM_MODEL_PROVIDER`, see `ProviderConfig`); Stream boots
+/// and works without one.
 pub fn runtime_for_root(root: impl AsRef<Path>) -> StreamRuntime {
-    StreamRuntime::new(FeltDbStore::new(FeltDbConfig::from_env(root)), default_adapters())
+    let runtime = StreamRuntime::new(FeltDbStore::new(FeltDbConfig::from_env(root)), default_adapters());
+    match ProviderConfig::from_env().build() {
+        Ok(Some(provider)) => runtime.with_model_provider(provider),
+        Ok(None) => runtime,
+        Err(problem) => {
+            eprintln!("stream: model provider not used ({problem}); using local intelligence");
+            runtime
+        }
+    }
 }
 
 pub struct StreamAppPort {
@@ -350,6 +376,55 @@ impl StreamAppPort {
                 to_value(runtime.list_connections(input.id.as_deref()).await?)
             }
             "stream.connection.graph" => to_value(runtime.connection_graph().await?),
+
+            "stream.chat.ask" => {
+                let request: AskRequest = parse(input)?;
+                if request.question.trim().is_empty() {
+                    return Err(invalid("ask a question"));
+                }
+                to_value(runtime.ask(request).await?)
+            }
+            "stream.reason.retrieve" => {
+                let request: AskRequest = parse(input)?;
+                to_value(runtime.retrieve(&request).await?)
+            }
+            "stream.insight.save" => {
+                let input: NewInsight = parse(input)?;
+                runtime.save_insight(input).await.map_err(|error| invalid(format!("{error:#}"))).and_then(to_value)
+            }
+            "stream.insight.list" => {
+                let input: InsightListInput = parse(input)?;
+                to_value(runtime.list_insights(input.signal_id.map(SignalId::new).as_ref()).await?)
+            }
+            "stream.insight.get" => {
+                let input: IdInput = parse(input)?;
+                runtime
+                    .get_insight(&InsightId::new(input.id.clone()))
+                    .await?
+                    .map(to_value)
+                    .unwrap_or_else(|| Err(not_found("insight", &input.id)))
+            }
+            "stream.insight.resolve" | "stream.insight.drop" => {
+                let input: IdInput = parse(input)?;
+                let status = if capability.ends_with("resolve") { InsightStatus::Resolved } else { InsightStatus::Dropped };
+                match runtime.set_insight_status(&InsightId::new(input.id.clone()), status).await {
+                    Ok(insight) => to_value(insight),
+                    Err(error) if error.to_string().starts_with("unknown insight") => Err(not_found("insight", &input.id)),
+                    Err(error) => Err(error.into()),
+                }
+            }
+            "stream.intelligence.status" => {
+                // Provider identity stays behind Stream: events are reported
+                // without it.
+                let events = runtime
+                    .intelligence_events()
+                    .await?
+                    .into_iter()
+                    .take(50)
+                    .map(|e| json!({ "operation": e.operation, "status": e.status, "subject_id": e.subject_id, "detail": e.detail, "at": e.created_at }))
+                    .collect::<Vec<_>>();
+                Ok(json!({ "model_backed": runtime.model_backed(), "recent_events": events }))
+            }
 
             "stream.source" | "stream.item" | "stream.query" | "stream.search" | "stream.attention" => {
                 self.invoke_grouped(capability, parse(input)?).await

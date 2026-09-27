@@ -5,7 +5,10 @@
 //! [`Signal`] is an advisory interpretation of durable items, and it must
 //! always be traceable back to them through [`Evidence`].
 
-use crate::{ContextId, ConnectionId, EvidenceId, ItemId, ProvenanceId, SignalId, SourceId};
+use crate::{
+    ClaimId, ConnectionId, ContextId, EvidenceId, InsightId, IntelligenceEventId, ItemId, ProvenanceId, SignalId,
+    SourceId,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
@@ -132,6 +135,56 @@ text_enum!(ClaimKind {
     WhyItMatters => "why_it_matters",
     Connection => "connection",
     Corroboration => "corroboration",
+    Contradiction => "contradiction",
+    Statement => "statement",
+    Detail => "detail",
+});
+
+// How a claim relates to the source material. Only `Observed` is a fact
+// stated by a source; everything else is Stream's advisory reasoning.
+text_enum!(ClaimBasis {
+    Observed => "observed",
+    Inferred => "inferred",
+    Connected => "connected",
+    Hypothesis => "hypothesis",
+});
+
+impl ClaimBasis {
+    pub fn label(self) -> &'static str {
+        match self {
+            ClaimBasis::Observed => "Observed",
+            ClaimBasis::Inferred => "Inferred",
+            ClaimBasis::Connected => "Connected",
+            ClaimBasis::Hypothesis => "Hypothesis",
+        }
+    }
+
+    /// Observed, inferred, and connected claims must cite evidence;
+    /// a hypothesis is explicitly an open possibility.
+    pub fn requires_evidence(self) -> bool {
+        !matches!(self, ClaimBasis::Hypothesis)
+    }
+}
+
+text_enum!(InsightKind {
+    Question => "question",
+    Hypothesis => "hypothesis",
+    Insight => "insight",
+    DecisionCandidate => "decision_candidate",
+    Investigation => "investigation",
+});
+
+impl InsightKind {
+    /// Kinds that represent unresolved work and so raise a signal's rank.
+    pub fn is_open_question(self) -> bool {
+        matches!(self, InsightKind::Question | InsightKind::Hypothesis | InsightKind::Investigation)
+    }
+}
+
+text_enum!(InsightStatus {
+    Open => "open",
+    Resolved => "resolved",
+    Dropped => "dropped",
 });
 
 // Where inside the underlying item an evidence excerpt was found.
@@ -155,6 +208,7 @@ text_enum!(ConnectionRelation {
     Matches => "matches",
     Via => "via",
     SameChange => "same_change",
+    Contradicts => "contradicts",
     Related => "related",
 });
 
@@ -264,6 +318,100 @@ pub struct Connection {
     pub strength: f32,
     pub rationale: String,
     pub evidence_ids: Vec<EvidenceId>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A proposition about a signal, labelled with its basis so Stream never
+/// presents an inference or hypothesis as an established fact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignalClaim {
+    pub id: ClaimId,
+    pub signal_id: SignalId,
+    pub item_id: ItemId,
+    pub basis: ClaimBasis,
+    pub statement: String,
+    pub confidence: f32,
+    pub rationale: String,
+    pub evidence_ids: Vec<EvidenceId>,
+    pub context_ids: Vec<ContextId>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl SignalClaim {
+    /// Presentation order: facts first, then connections, inferences, hypotheses.
+    pub fn basis_rank(&self) -> u8 {
+        match self.basis {
+            ClaimBasis::Observed => 0,
+            ClaimBasis::Connected => 1,
+            ClaimBasis::Inferred => 2,
+            ClaimBasis::Hypothesis => 3,
+        }
+    }
+}
+
+/// One point of a cross-source synthesis, always citing evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SynthesisPoint {
+    pub statement: String,
+    pub basis: ClaimBasis,
+    pub evidence_ids: Vec<EvidenceId>,
+}
+
+/// What several observations of one change agree on, add, differ on, and
+/// leave uncertain. Derived; the underlying evidence is never replaced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Synthesis {
+    pub signal_id: SignalId,
+    pub agreements: Vec<SynthesisPoint>,
+    pub new_information: Vec<SynthesisPoint>,
+    pub differences: Vec<SynthesisPoint>,
+    pub uncertainties: Vec<SynthesisPoint>,
+    pub source_count: usize,
+    pub observation_count: usize,
+    /// Audit only: kept in FeltDB, never serialized to any presentation or
+    /// AppPort surface.
+    #[serde(skip)]
+    pub generated_by: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A reasoning artifact the user chose to keep: derived and advisory, with
+/// the question that produced it and the evidence it rests on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Insight {
+    pub id: InsightId,
+    pub kind: InsightKind,
+    pub status: InsightStatus,
+    pub statement: String,
+    pub basis: ClaimBasis,
+    pub question: Option<String>,
+    pub evidence_ids: Vec<EvidenceId>,
+    pub signal_ids: Vec<SignalId>,
+    pub context_ids: Vec<ContextId>,
+    pub confidence: Option<f32>,
+    pub uncertainty: Option<String>,
+    /// Which reasoner produced the underlying answer. Audit metadata: kept
+    /// in FeltDB, never serialized to presentation or AppPort surfaces.
+    #[serde(skip)]
+    pub reasoner: String,
+    /// Whether a model (rather than local reasoning) backed it.
+    pub model_backed: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A durable, observable record of what the intelligence layer did when it
+/// did not simply succeed: provider failures, refusals, fallbacks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntelligenceEvent {
+    pub id: IntelligenceEventId,
+    /// interpret | synthesize | reason
+    pub operation: String,
+    /// failed | rejected | fallback
+    pub status: String,
+    pub subject_id: Option<String>,
+    pub detail: String,
+    pub provider: String,
     pub created_at: DateTime<Utc>,
 }
 

@@ -252,6 +252,64 @@ app Stream {
     index target_kind using hash(target_kind)
   }
 
+  collection Claim {
+    signal: ref Signal
+    item: ref Item
+    basis: text
+    statement: text
+    confidence: text
+    rationale: text
+    evidence: text
+    contexts: text
+    created_at: datetime
+    index signal using hash(signal)
+    index basis using hash(basis)
+  }
+
+  collection Synthesis {
+    signal: ref Signal
+    agreements: text
+    new_information: text
+    differences: text
+    uncertainties: text
+    source_count: integer
+    observation_count: integer
+    generated_by: text
+    advisory_state: text
+    updated_at: datetime
+    index signal using hash(signal)
+  }
+
+  collection Insight {
+    kind: text
+    status: text
+    statement: text
+    basis: text
+    question: text
+    evidence: text
+    signals: text
+    contexts: text
+    confidence: text
+    uncertainty: text
+    reasoner: text
+    advisory_state: text
+    created_at: datetime
+    updated_at: datetime
+    index kind using hash(kind)
+    index status using hash(status)
+  }
+
+  collection IntelligenceEvent {
+    operation: text
+    status: text
+    subject_id: text
+    detail: text
+    provider: text
+    created_at: datetime
+    index operation using hash(operation)
+    index status using hash(status)
+  }
+
   capability StreamSource {
     visibility public
     read Source
@@ -320,6 +378,26 @@ app Stream {
     read Signal
   }
 
+  capability StreamReasoning {
+    visibility public
+    read Signal
+    read Evidence
+    read Connection
+    read Claim
+    read Synthesis
+    read ContextEntry
+    read Insight
+    read Item
+    read Source
+    read Provenance
+  }
+
+  capability StreamInsight {
+    visibility public
+    read Insight
+    write Insight
+  }
+
   workflow SourceFetch {
     step record_attempt {
       write FetchAttempt
@@ -371,6 +449,25 @@ app Stream {
       write Evidence
       write Connection
       write ItemRelation
+      write Claim
+    }
+    step synthesize {
+      write Synthesis
+    }
+    step record_intelligence_events {
+      write IntelligenceEvent
+    }
+  }
+
+  workflow Reasoning {
+    step retrieve {
+      capability StreamReasoning
+    }
+    step record_intelligence_events {
+      write IntelligenceEvent
+    }
+    step save_insight {
+      write Insight
     }
   }
 
@@ -390,4 +487,8 @@ app Stream {
   policy Signal { read: authenticated write: authenticated }
   policy Evidence { read: authenticated write: authenticated }
   policy Connection { read: authenticated write: authenticated }
+  policy Claim { read: authenticated write: authenticated }
+  policy Synthesis { read: authenticated write: authenticated }
+  policy Insight { read: authenticated write: authenticated }
+  policy IntelligenceEvent { read: authenticated write: authenticated }
 }

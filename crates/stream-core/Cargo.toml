@@ -15,11 +15,13 @@ url.workspace = true
 stream-ingest = { path = "../stream-ingest" }
 stream-model = { path = "../stream-model" }
 stream-rules = { path = "../stream-rules" }
+stream-reason = { path = "../stream-reason" }
 stream-semantic = { path = "../stream-semantic" }
 stream-web = { path = "../stream-web" }
 
 [dev-dependencies]
 async-trait.workspace = true
+stream-reason = { path = "../stream-reason" }
 serde_json.workspace = true
 stream-semantic = { path = "../stream-semantic" }
 stream-rss = { path = "../stream-rss" }

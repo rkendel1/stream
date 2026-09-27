@@ -59,6 +59,40 @@ pub enum Command {
     },
     /// Sources Stream observes, with their processing stage.
     Sources,
+    /// Ask Stream about what it knows. Answers cite evidence and say when
+    /// evidence is insufficient.
+    Ask {
+        question: String,
+        /// Constrain the question to a signal (repeatable).
+        #[arg(long = "signal")]
+        signals: Vec<String>,
+        /// Constrain the question to a context (repeatable).
+        #[arg(long = "context")]
+        contexts: Vec<String>,
+        /// Constrain the question to a source (repeatable).
+        #[arg(long = "source")]
+        sources: Vec<String>,
+        /// Save the answer as durable reasoning: insight, hypothesis, question, decision_candidate, investigation.
+        #[arg(long)]
+        save: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reasoning you saved to Stream.
+    Insights {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One saved insight with its evidence.
+    Insight {
+        id: String,
+        #[arg(long, conflicts_with = "drop")]
+        resolve: bool,
+        #[arg(long)]
+        drop: bool,
+        #[arg(long)]
+        json: bool,
+    },
     Source {
         #[command(subcommand)]
         command: SourceCommand,
@@ -191,6 +225,11 @@ pub async fn run_with(cli: Cli, port: &StreamAppPort) -> Result<String> {
         Command::Context { command } => intelligence::context(runtime, command).await,
         Command::Connections { id, json } => intelligence::connections(runtime, id.as_deref(), json).await,
         Command::Sources => intelligence::sources(runtime).await,
+        Command::Ask { question, signals, contexts, sources, save, json } => {
+            intelligence::ask(runtime, question, signals, contexts, sources, save, json).await
+        }
+        Command::Insights { json } => intelligence::insights(runtime, json).await,
+        Command::Insight { id, resolve, drop, json } => intelligence::insight(runtime, &id, resolve, drop, json).await,
         Command::Source { command } => run_source(command, runtime).await,
         Command::Item { command } => run_item(command, runtime).await,
         Command::Query { command } => run_query(command, runtime).await,
@@ -345,6 +384,7 @@ async fn run_doctor(runtime: &StreamRuntime) -> Result<String> {
         "- storage problems: 0".to_string(),
         "- rule failures: 0".to_string(),
         "- delivery failures: 0".to_string(),
+        intelligence::doctor_line(runtime).await?,
     ]
     .join("\n"))
 }

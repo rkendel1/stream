@@ -45,6 +45,52 @@ stream sources
 stream appport invoke stream.signal.list '{}'
 ```
 
+### Think with Stream
+
+The **Chat** tab (and `stream ask`, and `stream.chat.ask` over AppPort) answers
+questions about what Stream knows — not general chat. Every answer:
+
+- is built from a bundle Stream retrieves for the question (signals, evidence,
+  connections, contexts, timeline, saved insights), never the whole database;
+- labels each statement **Observed** (a source states it), **Connected**,
+  **Inferred**, or **Hypothesis**, and cites the evidence behind it;
+- says plainly when the evidence is insufficient or only partial;
+- can be drilled into, down to the quoted source text and URL.
+
+"Ask Stream" on any signal, source, or context constrains retrieval to it.
+Conversations live only in the window; **Save insight** turns useful reasoning
+into a durable, advisory Stream object (insight, hypothesis, question,
+investigation, decision candidate) with its question, evidence, and contexts.
+
+```bash
+stream ask "Why does this matter to portable compute?"
+stream ask "What remains uncertain?" --signal <signal-id>
+stream ask "What connects to AppPort?" --save insight
+stream insights
+```
+
+### Model-backed intelligence (optional)
+
+Stream boots and works with no model: a deterministic local interpreter,
+synthesizer, and reasoner. To add a model, point Stream at any
+OpenAI-compatible endpoint — local (Ollama, llama.cpp server, LM Studio, vLLM)
+or remote:
+
+```bash
+STREAM_MODEL_PROVIDER=ollama STREAM_MODEL=llama3.2 cargo run -p stream-desktop
+# or: STREAM_MODEL_PROVIDER=openai-compatible STREAM_MODEL_BASE_URL=https://… STREAM_MODEL=… STREAM_MODEL_API_KEY=…
+```
+
+The model receives source metadata, the item, your relevant contexts, and
+relevant existing Stream knowledge, and must answer in a strict JSON schema.
+Everything it proposes passes the evidence gate: a quote that is not verbatim
+in the source is discarded along with the claim that depends on it; answers
+may cite only retrieved evidence. If the model fails or returns malformed
+output, Stream falls back to local intelligence and records a durable
+`IntelligenceEvent` (`stream doctor`, `stream.intelligence.status`). No part
+of Stream above the provider layer — and nothing on AppPort or in the UI —
+knows which provider is active.
+
 `stream-desktop --serve` serves the same UI on `http://127.0.0.1` (token-protected)
 for platforms without a system webview.
 
@@ -78,7 +124,8 @@ Desktop UI (stream-desktop)          stream CLI           AppPort clients
 - `crates/stream-ingest` — fetching, format detection, the adapter boundary
 - `crates/stream-web` — web page understanding and feed discovery
 - `crates/stream-rss` — RSS, Atom, and JSON Feed adapters
-- `crates/stream-semantic` — the replaceable `Interpreter` trait, a deterministic local interpreter, and the evidence gate
+- `crates/stream-semantic` — the replaceable `Interpreter` trait, the local and model-backed interpreters, the model provider boundary, and the evidence gate
+- `crates/stream-reason` — cross-source synthesis and grounded reasoning (local and model-backed) with the answer gate
 - `crates/stream-rules` — rules and explainable information-density ranking
 - `crates/stream-query` — query helpers
 - `crates/stream-appport` — the AppPort manifest and capability dispatch
@@ -92,6 +139,10 @@ Desktop UI (stream-desktop)          stream CLI           AppPort clients
 - **ContextEntry** — what the user cares about: name, kind (interest/project/concern), description, aliases, related contexts. Durable and evaluated against every item.
 - **Signal** — the information-density object: topic, subject, change, why it matters, status. Derived and advisory, never authority.
 - **Evidence** — one verbatim excerpt supporting one claim, pointing at its item, source, provenance, and URL. Individually addressable.
+- **Claim** — a proposition about a signal labelled observed / inferred / connected / hypothesis, with its evidence.
+- **Synthesis** — when several observations describe one change: what they agree on, what each adds, where they differ (contradictions stay visible), and what is uncertain, each point citing evidence.
+- **Insight** — saved reasoning (advisory), with its originating question, evidence, contexts, and signals.
+- **IntelligenceEvent** — durable record of provider failures, refused proposals, and fallbacks.
 - **Connection** — graph edges: Item → Topic, Item → Subject, Signal/Item → Context or Project (direct or via a related context), Item → Item. Item-to-item relations are also recorded through the existing `ItemRelation` infrastructure.
 
 Five sources reporting the same development become **one signal with five
@@ -100,7 +151,8 @@ observations of evidence**: Stream deduplicates information, not evidence.
 ### Ranking
 
 Today is ordered by a deterministic sum of observable factors: relationship to
-your context, your rules, corroborating sources, connection to earlier
+your context, your rules, independent corroboration (distinct publishers),
+open questions you saved, disputed evidence, connection to earlier
 observations, change magnitude, novelty, and recency. Resolved and dismissed
 signals leave Today but remain durable. Every factor carries its own
 explanation, so Stream can always answer *why did this appear here?* There is
@@ -110,6 +162,8 @@ no engagement optimization, infinite scroll, or notification volume.
 
 - **FeltDB = authority.** All durable state is FeltDB records. No SQLite, no JSON state files, no desktop-local database, no browser storage. The desktop bridge holds no data.
 - **Stream = information processing.** One runtime, one pipeline, one AppPort surface for every client.
+- **Evidence = grounding boundary.** Interpretation, synthesis, and answers can only cite verbatim, addressable evidence.
+- **Conversation = interface, not memory.** Asking writes nothing; only an explicit save creates an insight.
 - **Semantic model = advisory.** An interpreter only proposes. The evidence gate refuses claims whose excerpts are not verbatim in the source item, unknown contexts, and unsupported "why it matters". Refusals are recorded as advisory `SemanticDecision`s. The provider is recorded for audit and hidden from presentation.
 - **AppPort = portable interface.** The desktop app, CLI, and AppPort SDK clients all use `StreamAppPort::invoke`.
 - **Desktop = presentation.**
