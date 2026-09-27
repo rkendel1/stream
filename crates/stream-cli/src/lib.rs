@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use stream_appport::AppPortManifest;
 use stream_core::{FeltDbConfig, FeltDbStore, StreamRuntime};
 use stream_ingest::AdapterRegistry;
-use stream_model::{AttentionEventId, ItemId, ItemState, SourceId, SourceKind};
+use stream_model::{AttentionEventId, ItemId, SourceId, SourceKind};
 use stream_query::StreamQueryService;
 use stream_rss::default_adapters;
 use std::path::Path;
@@ -238,7 +238,7 @@ async fn run_attention(command: AttentionCommand, runtime: &StreamRuntime) -> Re
             .list_attention()
             .await?
             .into_iter()
-            .map(|event| format!("{}\t{}\t{}", event.id, event.status as u8, event.summary))
+            .map(|event| format!("{}\t{}\t{}", event.id, event.status, event.summary))
             .collect::<Vec<_>>()
             .join("\n")),
         AttentionCommand::Resolve { id } => {

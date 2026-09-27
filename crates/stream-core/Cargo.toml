@@ -15,3 +15,7 @@ url.workspace = true
 stream-ingest = { path = "../stream-ingest" }
 stream-model = { path = "../stream-model" }
 stream-rules = { path = "../stream-rules" }
+
+[dev-dependencies]
+stream-rss = { path = "../stream-rss" }
+uuid.workspace = true

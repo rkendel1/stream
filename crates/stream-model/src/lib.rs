@@ -321,6 +321,17 @@ pub enum AttentionStatus {
     Dismissed,
 }
 
+impl Display for AttentionStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Open => "open",
+            Self::Resolved => "resolved",
+            Self::Dismissed => "dismissed",
+        };
+        f.write_str(value)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub id: SourceId,

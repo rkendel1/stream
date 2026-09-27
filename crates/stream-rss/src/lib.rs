@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use atom_syndication::Feed as AtomFeed;
-use chrono::{DateTime, FixedOffset, Utc};
-use jsonfeed::Feed as JsonFeed;
+use chrono::{DateTime, Utc};
+use jsonfeed::{Content as JsonContent, Feed as JsonFeed};
 use rss::Channel;
 use stream_ingest::SourceAdapter;
 use stream_model::{NormalizedItem, Source, SourceKind};
@@ -77,9 +77,9 @@ impl SourceAdapter for AtomAdapter {
                     .and_then(|link| Url::parse(link.href()).ok());
                 let published_at = entry
                     .published()
-                    .as_ref()
-                    .or_else(|| Some(entry.updated()))
-                    .and_then(parse_fixed_offset_datetime);
+                    .cloned()
+                    .or_else(|| Some(entry.updated().to_owned()))
+                    .map(|value| value.with_timezone(&Utc));
                 let source_url = canonical_url.clone().unwrap_or_else(|| Url::parse(entry.id()).unwrap_or_else(|_| Url::parse("https://example.invalid/").unwrap()));
                 Ok(NormalizedItem {
                     source_kind: SourceKind::Atom,
@@ -115,7 +115,6 @@ impl SourceAdapter for JsonFeedAdapter {
     fn parse(&self, _source: &Source, body: &[u8], _fetched_at: DateTime<Utc>) -> Result<Vec<NormalizedItem>> {
         let feed: JsonFeed = serde_json::from_slice(body)?;
         feed.items
-            .unwrap_or_default()
             .into_iter()
             .map(|entry| {
                 let canonical_url = entry
@@ -126,7 +125,11 @@ impl SourceAdapter for JsonFeedAdapter {
                 let source_url = canonical_url.clone().unwrap_or_else(|| Url::parse("https://example.invalid/").unwrap());
                 let published_at = entry.date_published.as_ref().and_then(parse_rfc3339_datetime);
                 let title = entry.title.unwrap_or_else(|| "untitled".into());
-                let content_text = entry.content_text.unwrap_or_default();
+                let (content_text, content_html) = match entry.content {
+                    JsonContent::Text(text) => (text, None),
+                    JsonContent::Html(html) => (String::new(), Some(html)),
+                    JsonContent::Both(html, text) => (text, Some(html)),
+                };
                 let original_identifier = entry.id.clone();
                 Ok(NormalizedItem {
                     source_kind: SourceKind::JsonFeed,
@@ -137,8 +140,8 @@ impl SourceAdapter for JsonFeedAdapter {
                     canonical_url,
                     title,
                     content_text,
-                    content_html: entry.content_html,
-                    author: entry.authors.and_then(|mut authors| authors.pop().and_then(|author| author.name)),
+                    content_html,
+                    author: entry.author.and_then(author_name),
                     published_at,
                     original_identifier,
                     source_url,
@@ -150,14 +153,14 @@ impl SourceAdapter for JsonFeedAdapter {
     }
 }
 
-fn parse_fixed_offset_datetime(value: &FixedOffsetDateTimeSource) -> Option<DateTime<Utc>> {
-    Some(value.with_timezone(&Utc))
-}
-
-type FixedOffsetDateTimeSource = DateTime<FixedOffset>;
-
 fn parse_rfc3339_datetime(value: &String) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value).ok().map(|value| value.with_timezone(&Utc))
+}
+
+fn author_name(author: jsonfeed::Author) -> Option<String> {
+    serde_json::to_value(author)
+        .ok()
+        .and_then(|value| value.get("name").and_then(|value| value.as_str()).map(ToOwned::to_owned))
 }
 
 pub fn default_adapters() -> Vec<Box<dyn SourceAdapter>> {

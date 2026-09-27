@@ -11,16 +11,18 @@ use stream_model::{
     AttentionEvent, AttentionEventId, AttentionStatus, AttentionSummary, FetchAttempt, FetchResult,
     FetchStatus, Fingerprint, Item, ItemId, ItemRelation, ItemState, ItemStateRecord, NormalizedItem,
     Provenance, ProvenanceId, RelationKind, Rule, RuleAction, RuleExecution, RuleExecutionId,
-    RuleExecutionResult, SemanticDecision, SemanticDecisionId, Source, SourceId, SourceKind,
-    SourceStatus, Subscription, SubscriptionId,
+    RuleExecutionResult, RuleId, Source, SourceId, SourceKind, SourceStatus,
 };
 use stream_rules::rule_matches;
 
 const FELTDB_BRIDGE: &str = r#"
-import fs from 'node:fs/promises';
 import { createFeltDB } from '@feltdb/core';
 
-const input = JSON.parse(await fs.readFile(0, 'utf8'));
+let inputText = '';
+for await (const chunk of process.stdin) {
+  inputText += chunk;
+}
+const input = JSON.parse(inputText);
 const db = createFeltDB({ namespace: input.namespace, path: input.path });
 const collection = db.collection(input.collection);
 let result;
@@ -158,7 +160,6 @@ pub struct SearchQuery {
     pub after: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone)]
 pub struct StreamRuntime {
     store: FeltDbStore,
     fetcher: HttpFetcher,
@@ -248,41 +249,23 @@ impl StreamRuntime {
 
         let adapter = self.adapters.adapter_for(&source)?;
         let normalized_items = adapter.parse(&source, &body, Utc::now())?;
-        let mut new_item_ids = Vec::new();
-        let mut duplicates = 0_u64;
+        self.persist_fetch_result(source, attempt, normalized_items).await
+    }
 
-        for normalized_item in normalized_items.iter() {
-            let persisted = self.persist_normalized_item(&source, normalized_item).await?;
-            if persisted.is_new {
-                new_item_ids.push(persisted.item.id.clone());
-                self.apply_rules(&persisted.item).await?;
-            } else {
-                duplicates += 1;
-            }
-        }
-
-        source.status = SourceStatus::Active;
-        source.last_success_at = Some(Utc::now());
-        source.last_error_message = None;
-        source.last_error_category = None;
-        source.consecutive_failures = 0;
-        source.fetched_items_count += normalized_items.len() as u64;
-        source.duplicate_items_count += duplicates;
-        source.updated_at = Utc::now();
-        self.store.update("Source", source.id.as_str(), source_record(&source)).await?;
-
-        attempt.status = FetchStatus::Succeeded;
-        attempt.completed_at = Some(Utc::now());
-        attempt.item_count = normalized_items.len() as u64;
-        attempt.duplicate_count = duplicates;
-        attempt.retained_count = new_item_ids.len() as u64;
-        self.store.update("FetchAttempt", attempt.id.as_str(), fetch_attempt_record(&attempt)).await?;
-
-        Ok(FetchResult {
-            attempt,
-            new_item_ids,
-            duplicate_count: duplicates,
-        })
+    pub async fn ingest_items_for_source(
+        &self,
+        source_id: &SourceId,
+        normalized_items: Vec<NormalizedItem>,
+    ) -> Result<FetchResult> {
+        let source = self
+            .get_source(source_id)
+            .await?
+            .ok_or_else(|| anyhow!("unknown source: {}", source_id))?;
+        let attempt = FetchAttempt::started(source.id.clone());
+        self.store
+            .insert("FetchAttempt", attempt.id.as_str(), fetch_attempt_record(&attempt), true)
+            .await?;
+        self.persist_fetch_result(source, attempt, normalized_items).await
     }
 
     pub async fn list_items(&self) -> Result<Vec<ItemView>> {
@@ -567,6 +550,53 @@ impl StreamRuntime {
         Ok(PersistOutcome { item, is_new: true })
     }
 
+    async fn persist_fetch_result(
+        &self,
+        mut source: Source,
+        mut attempt: FetchAttempt,
+        normalized_items: Vec<NormalizedItem>,
+    ) -> Result<FetchResult> {
+        let mut new_item_ids = Vec::new();
+        let mut duplicates = 0_u64;
+
+        for normalized_item in normalized_items.iter() {
+            let persisted = self.persist_normalized_item(&source, normalized_item).await?;
+            if persisted.is_new {
+                new_item_ids.push(persisted.item.id.clone());
+                self.apply_rules(&persisted.item).await?;
+            } else {
+                duplicates += 1;
+            }
+        }
+
+        source.status = SourceStatus::Active;
+        source.last_success_at = Some(Utc::now());
+        source.last_error_message = None;
+        source.last_error_category = None;
+        source.consecutive_failures = 0;
+        source.fetched_items_count += normalized_items.len() as u64;
+        source.duplicate_items_count += duplicates;
+        source.updated_at = Utc::now();
+        self.store
+            .update("Source", source.id.as_str(), source_record(&source))
+            .await?;
+
+        attempt.status = FetchStatus::Succeeded;
+        attempt.completed_at = Some(Utc::now());
+        attempt.item_count = normalized_items.len() as u64;
+        attempt.duplicate_count = duplicates;
+        attempt.retained_count = new_item_ids.len() as u64;
+        self.store
+            .update("FetchAttempt", attempt.id.as_str(), fetch_attempt_record(&attempt))
+            .await?;
+
+        Ok(FetchResult {
+            attempt,
+            new_item_ids,
+            duplicate_count: duplicates,
+        })
+    }
+
     async fn record_observation(
         &self,
         source: &Source,
@@ -725,6 +755,7 @@ struct PersistOutcome {
 
 fn source_record(source: &Source) -> Value {
     json!({
+        "__id": source.id.as_str(),
         "kind": source.kind.to_string(),
         "endpoint": source.endpoint.as_str(),
         "identity": source.identity,
@@ -768,6 +799,7 @@ fn source_from_value(value: Value) -> Result<Source> {
 
 fn fetch_attempt_record(attempt: &FetchAttempt) -> Value {
     json!({
+        "__id": attempt.id.as_str(),
         "source": attempt.source_id.as_str(),
         "attempted_at": attempt.attempted_at.to_rfc3339(),
         "completed_at": attempt.completed_at.map(|value| value.to_rfc3339()).unwrap_or_default(),
@@ -782,6 +814,7 @@ fn fetch_attempt_record(attempt: &FetchAttempt) -> Value {
 
 fn item_record(item: &Item) -> Value {
     json!({
+        "__id": item.id.as_str(),
         "source": item.source_id.as_str(),
         "source_kind": item.source_kind.to_string(),
         "canonical_identity": item.canonical_identity,
@@ -821,6 +854,7 @@ fn item_from_value(value: Value) -> Result<Item> {
 
 fn item_state_record(record: &ItemStateRecord) -> Value {
     json!({
+        "__id": record.id.as_str(),
         "item": record.item_id.as_str(),
         "state": record.state.to_string(),
         "seen_at": record.seen_at.map(|value| value.to_rfc3339()).unwrap_or_default(),
@@ -852,6 +886,7 @@ fn item_state_from_value(value: Value) -> Result<ItemStateRecord> {
 
 fn provenance_record(provenance: &Provenance) -> Value {
     json!({
+        "__id": provenance.id.as_str(),
         "item": provenance.item_id.as_str(),
         "source": provenance.source_id.as_str(),
         "source_url": provenance.source_url.as_str(),
@@ -881,6 +916,7 @@ fn provenance_from_value(value: Value) -> Result<Provenance> {
 
 fn attention_record(event: &AttentionEvent) -> Value {
     json!({
+        "__id": event.id.as_str(),
         "item": event.item_id.as_str(),
         "rule": event.rule_id.as_ref().map(|value| value.as_str()).unwrap_or_default(),
         "status": attention_status_str(event.status),
@@ -906,6 +942,7 @@ fn attention_from_value(value: Value) -> Result<AttentionEvent> {
 
 fn rule_record(rule: &Rule) -> Value {
     json!({
+        "__id": rule.id.as_str(),
         "name": rule.name,
         "enabled": rule.enabled.to_string(),
         "source_filter": rule.source_filter.as_ref().map(|value| value.as_str()).unwrap_or_default(),
@@ -947,6 +984,7 @@ fn rule_from_value(value: Value) -> Result<Rule> {
 
 fn rule_execution_record(execution: &RuleExecution) -> Value {
     json!({
+        "__id": execution.id.as_str(),
         "rule": execution.rule_id.as_str(),
         "item": execution.item_id.as_str(),
         "executed_at": execution.executed_at.to_rfc3339(),
@@ -958,6 +996,7 @@ fn rule_execution_record(execution: &RuleExecution) -> Value {
 
 fn item_relation_record(relation: &ItemRelation) -> Value {
     json!({
+        "__id": relation.id.as_str(),
         "from_item": relation.from_item_id.as_str(),
         "to_item": relation.to_item_id.as_str(),
         "relation": relation.relation.to_string(),

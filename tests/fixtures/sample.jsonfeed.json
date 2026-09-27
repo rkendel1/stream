@@ -8,7 +8,7 @@
       "title": "JSON Feed update",
       "content_text": "JSON Feed item content",
       "date_published": "2026-09-27T00:00:00Z",
-      "authors": [{ "name": "Example JSON" }]
+      "author": { "name": "Example JSON" }
     }
   ]
 }
