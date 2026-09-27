@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+target/
+Cargo.lock
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.feltdb/
+.feltdb-data/

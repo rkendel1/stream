@@ -1,0 +1,16 @@
+{
+  "namespace": "stream",
+  "mode": "local",
+  "runtime": "node",
+  "storage": "durable",
+  "distributed": true,
+  "agents": {
+    "enabled": false
+  },
+  "application": {
+    "lifecycle": "managed"
+  },
+  "capabilities": {
+    "search": true
+  }
+}

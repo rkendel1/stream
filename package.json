@@ -1,0 +1,20 @@
+{
+  "name": "stream",
+  "version": "0.1.0",
+  "description": "Stream: a local-first Rust information runtime built on FeltDB and AppPort.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run feltdb:validate && cargo build --workspace && npm test",
+    "test": "cargo test --workspace && node --test tests/appport-surface.test.mjs",
+    "feltdb": "feltdb",
+    "feltdb:validate": "feltdb validate"
+  },
+  "dependencies": {
+    "@appport/sdk": "^1.1.21",
+    "@feltdb/core": "^0.11.8"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

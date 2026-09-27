@@ -1,0 +1,17 @@
+[package]
+name = "stream-rss"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+atom_syndication.workspace = true
+chrono.workspace = true
+jsonfeed.workspace = true
+rss.workspace = true
+serde_json.workspace = true
+stream-ingest = { path = "../stream-ingest" }
+stream-model = { path = "../stream-model" }
+url.workspace = true

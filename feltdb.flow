@@ -1,0 +1,265 @@
+flow_version 1
+
+app Stream {
+  collection Source {
+    kind: text
+    endpoint: text
+    identity: text
+    configuration: text
+    status: text
+    refresh_minutes: integer
+    last_checked_at: datetime
+    last_success_at: datetime
+    last_failure_at: datetime
+    last_error_category: text
+    last_error_message: text
+    consecutive_failures: integer
+    fetched_items_count: integer
+    duplicate_items_count: integer
+    created_at: datetime
+    updated_at: datetime
+    index endpoint using hash(endpoint)
+    index kind using hash(kind)
+    index status using hash(status)
+  }
+
+  collection FetchAttempt {
+    source: ref Source
+    attempted_at: datetime
+    completed_at: datetime
+    status: text
+    failure_category: text
+    item_count: integer
+    duplicate_count: integer
+    retained_count: integer
+    diagnostics: text
+    index source using hash(source)
+    index status using hash(status)
+  }
+
+  collection Item {
+    source: ref Source
+    source_kind: text
+    canonical_identity: text
+    canonical_url: text
+    title: text
+    content_text: text
+    content_html: text
+    author_name: text
+    published_at: datetime
+    fingerprint: text
+    provenance_summary: text
+    created_at: datetime
+    updated_at: datetime
+    index source using hash(source)
+    index fingerprint using hash(fingerprint)
+    index canonical_identity using hash(canonical_identity)
+    index published_at using sorted(published_at)
+  }
+
+  collection ItemSource {
+    item: ref Item
+    source: ref Source
+    original_identifier: text
+    source_url: text
+    observed_at: datetime
+    adapter_kind: text
+    index item using hash(item)
+    index source using hash(source)
+  }
+
+  collection Provenance {
+    item: ref Item
+    source: ref Source
+    source_url: text
+    observed_at: datetime
+    parser: text
+    original_identifier: text
+    canonical_identifier: text
+    fingerprint: text
+    transformations: text
+    index item using hash(item)
+    index source using hash(source)
+  }
+
+  collection ItemRelation {
+    from_item: ref Item
+    to_item: ref Item
+    relation: text
+    evidence: text
+    created_at: datetime
+    index from_item using hash(from_item)
+    index to_item using hash(to_item)
+    index relation using hash(relation)
+  }
+
+  collection ItemState {
+    item: ref Item
+    state: text
+    seen_at: datetime
+    read_at: datetime
+    saved_at: datetime
+    dismissed_at: datetime
+    important_at: datetime
+    acted_on_at: datetime
+    archived_at: datetime
+    updated_at: datetime
+    index item using hash(item)
+    index state using hash(state)
+  }
+
+  collection Rule {
+    name: text
+    enabled: text
+    source_filter: text
+    source_kind_filter: text
+    title_pattern: text
+    content_pattern: text
+    url_pattern: text
+    author_pattern: text
+    published_after: datetime
+    action: text
+    created_by: text
+    updated_by: text
+    explanation: text
+    created_at: datetime
+    updated_at: datetime
+    index enabled using hash(enabled)
+    index action using hash(action)
+  }
+
+  collection RuleExecution {
+    rule: ref Rule
+    item: ref Item
+    executed_at: datetime
+    result: text
+    failure: text
+    attention_event_id: text
+    index rule using hash(rule)
+    index item using hash(item)
+    index result using hash(result)
+  }
+
+  collection Subscription {
+    source: ref Source
+    name: text
+    query: text
+    status: text
+    created_at: datetime
+    updated_at: datetime
+    index source using hash(source)
+    index status using hash(status)
+  }
+
+  collection SemanticDecision {
+    item: ref Item
+    model: text
+    decision_type: text
+    decision: text
+    advisory_state: text
+    confidence: text
+    explanation: text
+    created_at: datetime
+    index item using hash(item)
+    index decision_type using hash(decision_type)
+  }
+
+  collection AttentionEvent {
+    item: ref Item
+    rule: ref Rule
+    status: text
+    summary: text
+    rationale: text
+    created_at: datetime
+    resolved_at: datetime
+    index item using hash(item)
+    index status using hash(status)
+  }
+
+  capability StreamSource {
+    visibility public
+    read Source
+    write Source
+    read FetchAttempt
+    write FetchAttempt
+  }
+
+  capability StreamItem {
+    visibility public
+    read Item
+    write Item
+    read ItemSource
+    write ItemSource
+    read ItemState
+    write ItemState
+    read Provenance
+    write Provenance
+  }
+
+  capability StreamQuery {
+    visibility public
+    read Item
+    read ItemRelation
+    read Source
+    read SemanticDecision
+    read RuleExecution
+  }
+
+  capability StreamSearch {
+    visibility public
+    read Item
+    read ItemState
+    read SemanticDecision
+  }
+
+  capability StreamAttention {
+    visibility public
+    read AttentionEvent
+    write AttentionEvent
+    read Rule
+    read RuleExecution
+  }
+
+  workflow SourceFetch {
+    step record_attempt {
+      write FetchAttempt
+    }
+    step persist_item {
+      write Item
+    }
+    step persist_item_source {
+      write ItemSource
+    }
+    step persist_provenance {
+      write Provenance
+    }
+  }
+
+  workflow RuleEvaluation {
+    step read_authorized_state {
+      capability StreamQuery
+    }
+    step persist_decision {
+      write SemanticDecision
+    }
+    step persist_execution {
+      write RuleExecution
+    }
+    step persist_attention {
+      write AttentionEvent
+    }
+  }
+
+  policy Source { read: authenticated write: authenticated }
+  policy FetchAttempt { read: authenticated write: authenticated }
+  policy Item { read: authenticated write: authenticated }
+  policy ItemSource { read: authenticated write: authenticated }
+  policy Provenance { read: authenticated write: authenticated }
+  policy ItemRelation { read: authenticated write: authenticated }
+  policy ItemState { read: authenticated write: authenticated }
+  policy Rule { read: authenticated write: authenticated }
+  policy RuleExecution { read: authenticated write: authenticated }
+  policy Subscription { read: authenticated write: authenticated }
+  policy SemanticDecision { read: authenticated write: authenticated }
+  policy AttentionEvent { read: authenticated write: authenticated }
+}
