@@ -107,6 +107,10 @@ const state = {
   tab: 'signals',
   signals: [],
   sources: [],
+  targets: [],
+  // Which targets' "Why am I watching this?" is open, and what it showed.
+  // Presentation memory only; re-read from Stream on every refresh.
+  expanded: new Map(),
   graph: null,
   contexts: [],
   jobs: new Map(),
@@ -123,14 +127,18 @@ const TITLES = { signals: 'Today', chat: 'Ask Stream', sources: 'Sources', conne
 
 async function refresh() {
   try {
-    const [signals, sources, graph, contexts, insights] = await Promise.all([
+    const [signals, sources, graph, contexts, insights, targets] = await Promise.all([
       call('stream.signal.list'),
       call('stream.source.list'),
       call('stream.connection.graph'),
       call('stream.context.list'),
       call('stream.insight.list'),
+      call('stream.target.list'),
     ]);
-    Object.assign(state, { signals, sources, graph, contexts, insights, loaded: true });
+    Object.assign(state, { signals, sources, graph, contexts, insights, targets, loaded: true });
+    for (const id of state.expanded.keys()) {
+      state.expanded.set(id, await call('stream.target.sources', { id }).catch(() => []));
+    }
   } catch (error) {
     toast(`Could not reach Stream: ${error.message}`);
   }
@@ -146,19 +154,61 @@ const STAGES = [
   ['building_signal', 'Building signal'],
 ];
 
+// What the user typed is parsed by Stream, never here: the result says
+// whether it is a resource or the information surface beneath a URL (/*).
 async function addUrl(url) {
-  let added;
+  let preview;
   try {
-    // Durable first: the source exists before anything is fetched.
-    added = await call('stream.source.add', { url, observe: false });
+    preview = await call('stream.target.parse', { url });
   } catch (error) {
     toast(error.message);
     return;
   }
-  const job = { source: added.source, existing: added.existing, report: null, error: null };
-  state.jobs.set(added.source.id, job);
+  if (preview.scope === 'descendants') return watchTarget(url, preview);
+  let added;
+  let source;
+  try {
+    // Durable first: the target and its source exist before anything is fetched.
+    added = await call('stream.target.add', { url, observe: false });
+    const surface = added.target.surfaces[0];
+    source = (await call('stream.source.get', { id: surface.source_id })).source;
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+  const job = { source, existing: added.existing, report: null, error: null };
+  state.jobs.set(source.id, job);
   renderJobs();
   observe(job);
+}
+
+// A descendants target: durable intent → discovery → observation.
+async function watchTarget(url, preview) {
+  const job = { kind: 'target', target: null, preview, phase: 'adding', run: null, error: null };
+  state.jobs.set(preview.id, job);
+  renderJobs();
+  try {
+    const added = await call('stream.target.add', { url, observe: false });
+    job.target = added.target;
+    job.phase = 'discovering';
+    renderJobs();
+    const discovered = await call('stream.target.discover', { id: job.target.id });
+    job.target = discovered.target;
+    if (job.target.status === 'unavailable' || job.target.status === 'failed') {
+      job.phase = job.target.status;
+    } else {
+      job.phase = 'observing';
+      renderJobs();
+      job.run = await call('stream.observation.run', { target_id: job.target.id, force: true });
+      job.target = (await call('stream.target.get', { id: job.target.id })).target;
+      job.phase = 'done';
+    }
+  } catch (error) {
+    job.error = error.message;
+    job.phase = 'failed';
+  }
+  renderJobs();
+  await refresh();
 }
 
 async function observe(job) {
@@ -210,10 +260,56 @@ function jobOutcome(job) {
   return { text: report.source.stage_detail || 'Observed.' };
 }
 
+function surfaceList(target) {
+  return h('ul', { class: 'surfaces' }, target.surfaces.map((surface) =>
+    h('li', { class: `health-${surface.health}`, title: surface.title || surface.url },
+      h('span', { class: 'mark' }, HEALTH_MARK[surface.health] || '•'), surface.label)));
+}
+
+const HEALTH_MARK = { healthy: '✓', pending: '…', retrying: '↻', unavailable: '✕', paused: '‖' };
+
+function targetName(target) {
+  return target.title || target.identity.display_name;
+}
+
+function targetJobCard(id, job) {
+  const target = job.target;
+  const name = target ? targetName(target) : job.preview.identity.display_name;
+  const eyebrow = {
+    adding: 'Adding…', discovering: 'Discovering…', observing: 'Observing…', done: 'Watching',
+    unavailable: 'Added — observation unavailable', failed: 'Could not finish',
+  }[job.phase];
+  const surfaces = target && target.surfaces.length > 0;
+  let result = null;
+  if (job.phase === 'done' && job.run) {
+    const signals = job.run.signals_created;
+    result = signals ? `${plural(signals, 'signal')} built. Stream keeps watching and will surface what changes.`
+      : 'Baseline recorded. Stream keeps watching and will surface what changes.';
+  }
+  if (job.phase === 'unavailable') result = (target.discovery_detail || '').replace(/^Observation unavailable:\s*/, '');
+  if (job.phase === 'failed') result = job.error || (target && target.discovery_detail) || 'Discovery failed. The target is saved; Stream will try again.';
+  return h('div', { class: `job target-job${job.phase === 'failed' ? ' failed' : ''}` },
+    h('div', { class: 'job-head' },
+      h('div', null,
+        h('div', { class: 'eyebrow' }, eyebrow),
+        h('div', { class: 'target-name' }, name),
+        h('div', { class: 'job-url' }, target ? target.display_url : job.preview.display_url)),
+      h('button', { class: 'subtle', type: 'button', 'aria-label': 'Dismiss', onclick: () => { state.jobs.delete(id); renderJobs(); } }, '✕')),
+    h('p', { class: 'watching' }, target ? target.watching : 'Watching this information surface'),
+    job.phase === 'discovering' || job.phase === 'adding' ? h('p', { class: 'muted small' }, 'Looking for feeds, the sitemap, and sections like blog, changelog, docs and releases…') : null,
+    surfaces ? surfaceList(target) : null,
+    result ? h('div', { class: 'job-result' }, h('span', null, result),
+      job.phase === 'done' ? h('button', { class: 'link', type: 'button', onclick: () => { state.tab = 'sources'; render(); } }, 'Why these?') : null) : null);
+}
+
 function renderJobs() {
   const container = $('#jobs');
   container.replaceChildren();
   for (const [id, job] of state.jobs) {
+    if (job.kind === 'target') {
+      container.append(targetJobCard(id, job));
+      continue;
+    }
     const stage = job.source.stage;
     const index = STAGES.findIndex(([key]) => key === stage);
     const outcome = jobOutcome(job);
@@ -325,12 +421,119 @@ async function setStatus(id, action) {
 }
 
 function renderSources() {
-  if (!state.sources.length) {
-    return [emptyState('No sources yet', 'Every URL you add becomes a durable source Stream keeps observing.', [
+  if (!state.sources.length && !state.targets.length) {
+    return [emptyState('Nothing watched yet', 'Add a URL to watch it, or end it in /* to watch the information surface beneath it.', [
       h('button', { class: 'primary', type: 'button', onclick: openAddForm }, '+ Add URL'),
     ])];
   }
-  return state.sources.map((source) => {
+  const inTarget = new Set(state.targets.flatMap((t) => t.surfaces.map((s) => s.source_id)));
+  const nodes = [];
+  const surfaces = state.targets.filter((t) => t.scope === 'descendants');
+  if (surfaces.length) {
+    nodes.push(h('div', { class: 'group-title' }, 'Information surfaces'));
+    nodes.push(...surfaces.map(targetCard));
+  }
+  const resources = state.sources.filter((source) => !inTarget.has(source.id) || state.targets.some((t) => t.scope === 'resource' && t.surfaces.some((s) => s.source_id === source.id)));
+  if (resources.length) {
+    if (surfaces.length) nodes.push(h('div', { class: 'group-title' }, 'Resources'));
+    nodes.push(...resources.map(sourceRow));
+  }
+  return nodes;
+}
+
+function targetCard(target) {
+  const expanded = state.expanded.has(target.id);
+  const paused = target.status === 'paused';
+  const why = h('details', { class: 'why-watch', open: expanded, ontoggle: async (event) => {
+    const open = event.currentTarget.open;
+    if (open && !state.expanded.has(target.id)) {
+      state.expanded.set(target.id, null);
+      try {
+        state.expanded.set(target.id, await call('stream.target.sources', { id: target.id }));
+      } catch (error) {
+        toast(error.message);
+      }
+      render();
+    } else if (!open) {
+      state.expanded.delete(target.id);
+    }
+  } },
+    h('summary', null, 'Why am I watching this?'),
+    expanded && state.expanded.get(target.id) ? watchedList(state.expanded.get(target.id)) : h('p', { class: 'muted small' }, 'Loading…'));
+  const act = (capability, message) => async () => {
+    try {
+      if (capability === 'observe') {
+        toast('Observing now…');
+        const run = await call('stream.observation.run', { target_id: target.id, force: true });
+        toast(runSummary(run));
+      } else {
+        const result = await call(capability, { id: target.id });
+        if (message) toast(typeof message === 'function' ? message(result) : message);
+      }
+    } catch (error) {
+      toast(error.message);
+    }
+    await refresh();
+  };
+  return h('div', { class: `target status-${target.status}`, 'data-target': target.id },
+    h('div', { class: 'target-head' },
+      h('div', null,
+        h('div', { class: 'target-name' }, targetName(target)),
+        h('div', { class: 'job-url' }, target.display_url)),
+      h('span', { class: `stage ${target.status}` }, target.status)),
+    h('p', { class: 'watching' }, target.watching),
+    target.status === 'unavailable' || target.status === 'failed'
+      ? h('p', { class: 'muted small' }, (target.discovery_detail || '').replace(/^Observation unavailable:\s*/, '')) : null,
+    target.surfaces.length ? surfaceList(target) : null,
+    h('div', { class: 'source-meta' },
+      `Discovered ${ago(target.last_discovered_at)} · next discovery ${until(target.next_discovery_at)} · last observed ${ago(target.last_observed_at)}`),
+    h('div', { class: 'target-actions' },
+      h('button', { class: 'subtle', type: 'button', onclick: act('stream.target.discover', (r) => r.new_sources.length ? `Found ${plural(r.new_sources.length, 'new surface')}.` : 'No new surfaces.') }, 'Discover now'),
+      h('button', { class: 'subtle', type: 'button', onclick: act('observe') }, 'Observe now'),
+      h('button', { class: 'subtle', type: 'button', onclick: act(paused ? 'stream.target.resume' : 'stream.target.pause', paused ? 'Watching again.' : 'Paused. Nothing is forgotten.') }, paused ? 'Resume' : 'Pause')),
+    why);
+}
+
+function runSummary(run) {
+  const parts = [`Observed ${plural(run.sources_observed, 'surface')}`];
+  if (run.signals_created) parts.push(`${plural(run.signals_created, 'new signal')}`);
+  if (run.signals_corroborated) parts.push(`${run.signals_corroborated} corroborated`);
+  if (!run.signals_created && !run.signals_corroborated) parts.push(run.new_items || run.page_changes ? 'nothing that needs your attention' : 'nothing new');
+  if (run.sources_failed) parts.push(`${plural(run.sources_failed, 'problem')}`);
+  return parts.join(' · ');
+}
+
+function until(timestamp) {
+  if (!timestamp) return 'not scheduled';
+  const seconds = (new Date(timestamp).getTime() - Date.now()) / 1000;
+  if (seconds <= 60) return 'now';
+  if (seconds < 3600) return `in ${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `in ${Math.round(seconds / 3600)}h`;
+  return `in ${Math.round(seconds / 86400)}d`;
+}
+
+function watchedList(watched) {
+  return h('ul', { class: 'watched' }, watched.map((w) => {
+    const source = w.source;
+    return h('li', { class: `health-${w.health}` },
+      h('div', { class: 'watched-head' },
+        h('span', { class: 'mark' }, HEALTH_MARK[w.health] || '•'),
+        h('strong', null, SURFACE_LABEL(source.surface_kind)),
+        h('span', null, ' '),
+        externalLink(source.canonical_url, source.title || source.canonical_url)),
+      h('p', { class: 'small' }, w.why),
+      h('p', { class: 'muted small' },
+        `last observed ${ago(source.last_observed_at)}`,
+        w.health === 'retrying' || w.health === 'unavailable' ? ` · ${source.last_error_message || 'failing'}` : ''),
+      w.last_change && w.last_change.change !== 'baseline' ? h('p', { class: 'small change-note' }, `Last change: ${w.last_change.summary}`) : null);
+  }));
+}
+
+function SURFACE_LABEL(kind) {
+  return kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : 'Page';
+}
+
+function sourceRow(source) {
     const observedVia = source.adapter_kind !== source.kind && source.adapter_kind !== 'web'
       ? ` · observed via ${KIND_LABEL[source.adapter_kind] || source.adapter_kind}` : '';
     const job = { source, existing: true, report: null, error: null };
@@ -340,7 +543,7 @@ function renderSources() {
         h('div', { class: 'source-url' }, externalLink(source.original_url))),
       h('span', { class: `stage ${source.stage}` }, source.stage.replace('_', ' ')),
       h('div', { class: 'source-meta' },
-        `${KIND_LABEL[source.kind] || source.kind}${observedVia} · added ${ago(source.discovered_at)} · last observed ${ago(source.last_observed_at)}`,
+        `${KIND_LABEL[source.kind] || source.kind}${observedVia} · Watching this resource · added ${ago(source.discovered_at)} · last observed ${ago(source.last_observed_at)}`,
         source.stage_detail && source.stage !== 'failed' ? ` · ${source.stage_detail}` : ''),
       source.stage === 'failed'
         ? h('div', { class: 'source-error' }, h('span', null, source.stage_detail || source.last_error_message || 'Observation failed'),
@@ -348,7 +551,6 @@ function renderSources() {
         : h('div', null,
             h('button', { class: 'subtle', type: 'button', onclick: () => askStream('Why does this matter to me?', { source_ids: [source.id] }, source.title || host(source.canonical_url)) }, 'Ask why this matters'),
             h('button', { class: 'subtle', type: 'button', onclick: () => { state.jobs.set(source.id, job); observe(job); } }, 'Observe now')));
-  });
 }
 
 function renderConnections() {
@@ -778,12 +980,38 @@ function wireForms() {
   for (const button of document.querySelectorAll('[data-close]')) {
     button.addEventListener('click', () => (button.closest('form').hidden = true));
   }
+  let previewTimer;
+  $('#add-url').addEventListener('input', (event) => {
+    clearTimeout(previewTimer);
+    const value = event.currentTarget.value.trim();
+    const preview = $('#add-preview');
+    if (!value) {
+      preview.hidden = true;
+      return;
+    }
+    previewTimer = setTimeout(async () => {
+      try {
+        const parsed = await call('stream.target.parse', { url: value });
+        preview.className = `preview scope-${parsed.scope}`;
+        preview.replaceChildren(
+          h('strong', null, parsed.scope === 'descendants' ? 'Observation target' : 'Resource'),
+          ` · ${parsed.identity.display_name} · `,
+          parsed.scope === 'descendants' ? parsed.identity.watching : 'Watching this resource',
+          h('span', { class: 'muted' }, ` — ${parsed.display_url}`));
+      } catch (error) {
+        preview.className = 'preview invalid';
+        preview.textContent = error.message.replace(/^.*?: /, '');
+      }
+      preview.hidden = false;
+    }, 200);
+  });
   $('#add-form').addEventListener('submit', (event) => {
     event.preventDefault();
     const input = $('#add-url');
     const url = input.value.trim();
     if (!url) return;
     input.value = '';
+    $('#add-preview').hidden = true;
     $('#add-form').hidden = true;
     addUrl(url);
   });
@@ -821,6 +1049,11 @@ function wireForms() {
     }
   });
   window.addEventListener('focus', () => { if (!state.jobs.size) refresh(); });
+  // Stream keeps observing in the background; show what it found.
+  setInterval(() => {
+    const busy = [...state.jobs.values()].some((job) => job.kind === 'target' ? !['done', 'failed', 'unavailable'].includes(job.phase) : !job.report && !job.error);
+    if (!busy && state.tab !== 'chat' && $('#drawer').hidden && document.visibilityState === 'visible') refresh();
+  }, 30000);
 }
 
 wireForms();

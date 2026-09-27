@@ -71,6 +71,18 @@ impl AppPortManifest {
                 capability("stream.source.observe", Consequential, "Observe a source again: fetch, normalize, understand, connect.", &["invoke"]),
                 capability("stream.source.list", Observation, "List durable sources, newest first.", &["invoke"]),
                 capability("stream.source.get", Observation, "A source with its observation history, items, and signals.", &["invoke"]),
+                // Observation targets: `https://example.com` watches a resource,
+                // `https://example.com/*` the information surface beneath it.
+                capability("stream.target.parse", Observation, "How Stream understands a URL (with optional terminal /* observation scope): canonical url, scope, and provider identity. Adds nothing.", &["invoke"]),
+                capability("stream.target.add", Consequential, "Add an observation target. `url` may end in /* to observe the information surface beneath it; the result exposes url and scope separately. Unless observe=false, discovers and observes it now.", &["invoke"]),
+                capability("stream.target.list", Observation, "Observation targets with scope, status, and watched surfaces.", &["invoke"]),
+                capability("stream.target.get", Observation, "One observation target with its surfaces and why each is watched.", &["invoke"]),
+                capability("stream.target.discover", Consequential, "Run discovery for a target now.", &["invoke"]),
+                capability("stream.target.pause", Consequential, "Pause observing a target (it stays durable).", &["invoke"]),
+                capability("stream.target.resume", Consequential, "Resume observing a target.", &["invoke"]),
+                capability("stream.target.sources", Observation, "The sources a target watches, each with its discovery provenance, health, and last change.", &["invoke"]),
+                capability("stream.observation.status", Observation, "The durable observation schedule: targets, sources due, failures, next due time, last run.", &["invoke"]),
+                capability("stream.observation.run", Consequential, "Run one observation pass now (optionally for one target, optionally forced).", &["invoke"]),
                 capability("stream.item.get", Observation, "A canonical item with its state and provenance.", &["invoke"]),
                 capability("stream.item.list", Observation, "All canonical items.", &["invoke"]),
                 capability("stream.signal.list", Observation, "Signals ranked by information density (Today), with ranking explanations.", &["invoke"]),
@@ -171,6 +183,28 @@ struct AddInput {
     observe: bool,
     #[serde(default)]
     provenance: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct UrlInput {
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct TargetAddInput {
+    url: String,
+    #[serde(default = "default_true")]
+    observe: bool,
+    #[serde(default)]
+    provenance: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RunInput {
+    #[serde(default)]
+    target_id: Option<String>,
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -319,6 +353,64 @@ impl StreamAppPort {
                     .await?
                     .map(to_value)
                     .unwrap_or_else(|| Err(not_found("source", &input.id)))
+            }
+            "stream.target.parse" => {
+                let input: UrlInput = parse(input)?;
+                runtime.preview_target(&input.url).map_err(|error| invalid(format!("{error:#}"))).and_then(to_value)
+            }
+            "stream.target.add" => {
+                let input: TargetAddInput = parse(input)?;
+                let provenance = input.provenance.unwrap_or_else(|| self.default_provenance.clone());
+                if !input.observe {
+                    let added = runtime.add_target(&input.url, &provenance).await.map_err(|error| invalid(format!("{error:#}")))?;
+                    let summary = runtime.target_summary(&added.target.id).await?;
+                    return to_value(json!({ "existing": added.existing, "target": summary }));
+                }
+                runtime.preview_target(&input.url).map_err(|error| invalid(format!("{error:#}")))?;
+                let outcome = runtime.add_and_watch(&input.url, &provenance, None).await?;
+                let summary = runtime.target_summary(&outcome.target.id).await?;
+                to_value(json!({
+                    "existing": outcome.added.existing,
+                    "target": summary,
+                    "run": outcome.run,
+                    "report": outcome.report,
+                }))
+            }
+            "stream.target.list" => to_value(runtime.target_summaries().await?),
+            "stream.target.get" | "stream.target.discover" | "stream.target.pause" | "stream.target.resume" | "stream.target.sources" => {
+                let input: IdInput = parse(input)?;
+                let target = runtime.find_target(&input.id).await.map_err(|error| invalid(format!("{error:#}")))?;
+                let Some(target) = target else { return Err(not_found("target", &input.id)) };
+                match capability {
+                    "stream.target.discover" => {
+                        let outcome = runtime.discover_target(&target.id).await?;
+                        let summary = runtime.target_summary(&target.id).await?;
+                        to_value(json!({ "target": summary, "new_sources": outcome.new_sources, "failure": outcome.failure }))
+                    }
+                    "stream.target.pause" => {
+                        runtime.pause_target(&target.id).await?;
+                        to_value(runtime.target_summary(&target.id).await?)
+                    }
+                    "stream.target.resume" => {
+                        runtime.resume_target(&target.id).await?;
+                        to_value(runtime.target_summary(&target.id).await?)
+                    }
+                    "stream.target.sources" => to_value(runtime.target_sources(&target.id).await?),
+                    _ => {
+                        let summary = runtime.target_summary(&target.id).await?;
+                        let sources = runtime.target_sources(&target.id).await?;
+                        to_value(json!({ "target": summary, "sources": sources }))
+                    }
+                }
+            }
+            "stream.observation.status" => to_value(runtime.observation_status().await?),
+            "stream.observation.run" => {
+                let input: RunInput = parse(input)?;
+                let target_id = match input.target_id {
+                    Some(id) => Some(runtime.find_target(&id).await?.ok_or_else(|| not_found("target", &id))?.id),
+                    None => None,
+                };
+                to_value(runtime.run_observation(stream_core::RunOptions { trigger: self.default_provenance.clone(), target_id, force: input.force }).await?)
             }
             "stream.item.get" => {
                 let input: IdInput = parse(input)?;

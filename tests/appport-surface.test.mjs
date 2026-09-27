@@ -65,6 +65,8 @@ test('Rust manifest exposes the Stream AppPort capability surface', () => {
     'stream.source.add', 'stream.source.list', 'stream.item.get', 'stream.item.list',
     'stream.signal.get', 'stream.signal.list', 'stream.context.list', 'stream.context.add',
     'stream.connection.list', 'stream.chat.ask', 'stream.reason.retrieve', 'stream.insight.save',
+    'stream.target.parse', 'stream.target.add', 'stream.target.list', 'stream.target.get', 'stream.target.discover',
+    'stream.target.pause', 'stream.target.resume', 'stream.target.sources', 'stream.observation.status', 'stream.observation.run',
   ]) {
     assert.ok(rustCapabilities.includes(name), `${name} is part of the surface`);
   }
@@ -85,6 +87,15 @@ test('an AppPort client drives Stream through the Rust runtime and FeltDB', asyn
     const again = await client.call('stream.source.add', { url: 'example.com/article', observe: false });
     assert.equal(again.existing, true);
     assert.equal(again.source.id, added.source.id);
+
+    // Observation targets: the client sends the user's /* syntax and gets the
+    // parsed url and scope back separately.
+    const target = await client.call('stream.target.add', { url: 'https://x.com/devxritesh/status/*', observe: false });
+    assert.equal(target.target.scope, 'descendants');
+    assert.equal(target.target.url, 'https://x.com/devxritesh/status/');
+    assert.equal(target.target.identity.provider, 'x');
+    assert.equal(target.target.identity.display_name, '@devxritesh');
+    assert.match(rust('targets'), /https:\/\/x\.com\/devxritesh\/status\/\*\s+descendants/);
 
     // The same durable state is visible to the CLI, a separate process.
     assert.match(rust('context', 'list'), /Portable compute/);

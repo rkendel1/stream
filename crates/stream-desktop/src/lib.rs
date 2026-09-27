@@ -40,6 +40,26 @@ impl DesktopBridge {
         &self.port
     }
 
+    /// Keep observing in the background while Stream is open: discovery and
+    /// observation run on the durable schedule held in FeltDB (any other
+    /// Stream process holding the worker lease is respected). Set
+    /// `STREAM_OBSERVATION_WORKER=0` to disable. Returns the stop flag.
+    pub fn start_observation_worker(&self, runtime: &tokio::runtime::Handle) -> Arc<std::sync::atomic::AtomicBool> {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let disabled = std::env::var("STREAM_OBSERVATION_WORKER").map(|v| matches!(v.trim(), "0" | "false" | "no")).unwrap_or(false);
+        if disabled {
+            return stop;
+        }
+        let port = self.port.clone();
+        let flag = stop.clone();
+        runtime.spawn(async move {
+            // Let the window come up before the first pass.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            port.runtime().run_worker(flag, std::time::Duration::from_secs(60)).await;
+        });
+        stop
+    }
+
     /// Handle one serialized UI request and produce a serialized response.
     pub async fn handle(&self, raw: &str) -> String {
         let response = match serde_json::from_str::<BridgeRequest>(raw) {

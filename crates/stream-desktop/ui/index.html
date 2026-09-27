@@ -17,13 +17,21 @@
 
   <div class="shell">
     <form id="add-form" class="composer" hidden autocomplete="off">
-      <label for="add-url">What do you want to know about?</label>
+      <label for="add-url">Add something to Stream</label>
       <div class="composer-row">
-        <input id="add-url" name="url" type="text" inputmode="url" placeholder="Paste a URL — an article, a repo, a paper, a feed…" required>
-        <button class="primary" type="submit">Understand</button>
+        <input id="add-url" name="url" type="text" inputmode="url" placeholder="https://example.com/*  — or an article, a repo, a feed…" required>
+        <button class="primary" type="submit">Add</button>
         <button class="ghost" type="button" data-close>Cancel</button>
       </div>
-      <p class="hint">Stream works out what it is, what changed, and how it connects to what you care about.</p>
+      <p id="add-preview" class="preview" aria-live="polite" hidden></p>
+      <div class="scope-help">
+        <p>A URL watches that resource. Ending it in <code>/*</code> means <em>“watch the information surface beneath this URL.”</em></p>
+        <ul>
+          <li><code>example.com/*</code> <span>→ watch the site</span></li>
+          <li><code>github.com/a/b/*</code> <span>→ watch the project</span></li>
+          <li><code>x.com/user/status/*</code> <span>→ watch the account</span></li>
+        </ul>
+      </div>
     </form>
 
     <form id="context-form" class="composer" hidden autocomplete="off">

@@ -17,6 +17,42 @@ The URL is the input. Whether it is a web page, a blog, GitHub, a paper,
 documentation, a YouTube page, or an RSS/Atom/JSON feed, Stream works out how to
 understand and observe it.
 
+### A resource, or the information surface beneath it
+
+A URL identifies a resource. A URL ending in **`/*`** tells Stream to observe
+the information surface *beneath* it:
+
+| You add | Scope | Stream watches |
+| --- | --- | --- |
+| `https://example.com` | `resource` | that resource |
+| `https://example.com/*` | `descendants` | the site: its feeds, blog, changelog, docs, releases, news, … |
+| `https://github.com/org/repo/*` | `descendants` | the project: repository page, releases, tags |
+| `https://x.com/user/status/*` | `descendants` | the account's posts |
+
+`/*` is not a wildcard and not a crawler: it is an explicit observation-scope
+operator, recognized only as a terminal `/*` (`https://example.com/foo*bar` and
+`…/*/foo` are rejected). It is parsed once, in Rust, into a durable
+**ObservationTarget** with a separate `url` and `scope`; the `*` never reaches
+the network. The resource and its information surface are different targets.
+
+For a descendants target Stream runs **bounded, explainable discovery**
+(declared feeds, conventional feed paths, robots.txt and the sitemap, obvious
+navigation sections, linked GitHub repositories, one hop of section feeds) and
+registers each surface as a source that remembers *why* it is watched. A
+durable scheduler then keeps observing: new feed entries, material page
+changes (normalized snapshot diffs), and new pages in watched sections enter
+the normal pipeline, and discovery re-runs on its own schedule so surfaces
+that appear later (a new `/changelog`) are picked up without adding anything.
+Stream observes broadly and surfaces selectively: a first observation is a
+baseline, not a burst of signals, and the same change seen on the blog, the
+changelog, and the releases feed is one signal with several sources.
+
+X has no public feed Stream can read without credentials. An X target is still
+durable and honest — it reports *observation unavailable* rather than
+pretending — until you point `STREAM_X_FEED_TEMPLATE` at a feed endpoint you
+trust (e.g. `https://bridge.example/{handle}/rss`). Stream never asks for or
+stores credentials.
+
 ## Quick start
 
 ```bash
@@ -25,7 +61,7 @@ cargo run -p stream-desktop --release # the Stream desktop app
 ```
 
 1. **+ Context** — tell Stream what you care about (`Portable compute`, a project like `AppPort`, a concern like `Customer pain`). Relate contexts to each other.
-2. **+ Add URL** — paste a URL. Stream shows *Fetching source → Understanding content → Finding connections → Building signal*.
+2. **+ Add URL** — paste a URL. Stream shows *Fetching source → Understanding content → Finding connections → Building signal*. End it in `/*` (the form explains this) and Stream shows *Discovering… → Watching 5 information surfaces ✓ Blog ✓ Changelog ✓ Feed …*; **Sources → Why am I watching this?** explains every surface.
 3. **Today** shows signals, not raw items: topic, subject, what changed, why it may matter to you, and what it connects to.
 4. **View evidence** / **Why here?** — every claim quotes the source it came from (excerpt → item → source → URL), and the ranking explains itself factor by factor.
 5. Add another URL about the same change: Stream recognizes it and adds it as corroborating evidence to the existing signal instead of showing a second card.
@@ -37,6 +73,10 @@ The same state is available from the CLI and from AppPort:
 cargo install --path crates/stream-cli   # installs `stream`
 stream context add "Portable compute" -d "Running workloads anywhere" --related AppPort
 stream add https://example.com/article
+stream add 'https://example.com/*'   # watch the information surface beneath it
+stream targets                  # observation targets and their scope
+stream target <id> [show|discover|sources|pause|resume]
+stream observe [--watch]        # run what is due (durable schedule), or keep observing
 stream signals                  # Today, ranked by information density
 stream signal <signal-id>       # evidence, connections, and why it is ranked there
 stream context list
@@ -121,8 +161,9 @@ Desktop UI (stream-desktop)          stream CLI           AppPort clients
 
 - `crates/stream-model` — typed IDs and records; URL canonicalization; the intelligence model (`ContextEntry`, `Signal`, `Evidence`, `Connection`)
 - `crates/stream-core` — FeltDB bridge, the URL → signal pipeline, context, signals, evidence, connections
-- `crates/stream-ingest` — fetching, format detection, the adapter boundary
-- `crates/stream-web` — web page understanding and feed discovery
+- `crates/stream-ingest` — the network boundary (network policy, bounded fetching), format detection, the adapter boundary
+- `crates/stream-web` — web page understanding, links, and normalized page blocks for change detection
+- `crates/stream-discovery` — the observation target resolver (generic web, GitHub, X) and bounded, explainable discovery
 - `crates/stream-rss` — RSS, Atom, and JSON Feed adapters
 - `crates/stream-semantic` — the replaceable `Interpreter` trait, the local and model-backed interpreters, the model provider boundary, and the evidence gate
 - `crates/stream-reason` — cross-source synthesis and grounded reasoning (local and model-backed) with the answer gate
@@ -136,6 +177,10 @@ Desktop UI (stream-desktop)          stream CLI           AppPort clients
 ### Model
 
 - **Source** — a durable identity for a URL: canonical URL (the identity), original URL, user-facing kind (web, GitHub, research, …), the adapter it is observed through (RSS/Atom/JSON Feed/web), title, processing stage, discovered/last-observed timestamps, provenance, and fetch history. Adding the same URL again (tracking parameters, `www.`, fragments, trailing slashes, …) resolves to the same source. Failures are durable state on the source and its fetch attempts; the URL is never lost.
+- **ObservationTarget** — the user's durable intent: seed URL, canonical URL, scope (`resource` | `descendants`), resolved identity (provider, kind, e.g. `x / account / @user`), status, discovery status, discovery policy and schedule (`next_discovery_at`, `next_observation_at`), and the sources it watches.
+- **DiscoveryRelation** — why a source is watched: target, source, discovered from, method (feed declaration, sitemap, navigation link, provider resolution, provider API, …), confidence, reason.
+- **PageSnapshot** — a normalized observation of a page and how it differs from the previous one (`baseline` / `unchanged` / `changed` / `materially_changed`, with added and removed lines as evidence).
+- **ObservationRun** — one pass of the scheduler, recorded durably. A FeltDB lease keeps two processes from running the schedule at once.
 - **ContextEntry** — what the user cares about: name, kind (interest/project/concern), description, aliases, related contexts. Durable and evaluated against every item.
 - **Signal** — the information-density object: topic, subject, change, why it matters, status. Derived and advisory, never authority.
 - **Evidence** — one verbatim excerpt supporting one claim, pointing at its item, source, provenance, and URL. Individually addressable.
@@ -169,6 +214,7 @@ no engagement optimization, infinite scroll, or notification volume.
 - **Desktop = presentation.**
 - **RSS/Atom/JSON Feed = adapters** underneath the generic source model.
 - **Information density > information volume.**
+- **Network = Rust.** Every fetch goes through one bounded fetcher: http(s) only, no credential-bearing URLs, no private/loopback addresses unless `STREAM_ALLOW_PRIVATE_NETWORK=1`, bounded redirects, response size, concurrency, and discovery depth. The UI never fetches.
 
 ## Data
 
@@ -176,7 +222,9 @@ State lives in FeltDB under the Stream root: `STREAM_ROOT`, or the nearest
 directory containing `feltdb.flow`, or the checkout the binaries were built
 from. The data path defaults to `.feltdb-data/stream` there (override with
 `STREAM_FELTDB_PATH`). The desktop app and the CLI share it and can run at the
-same time. FeltDB telemetry is disabled for the local bridge unless you set
+same time. While the desktop app is open it keeps observing on the durable
+schedule (`STREAM_OBSERVATION_WORKER=0` turns that off); `stream observe --watch`
+does the same from a terminal. FeltDB telemetry is disabled for the local bridge unless you set
 `FELTDB_TELEMETRY` yourself.
 
 ## Validation

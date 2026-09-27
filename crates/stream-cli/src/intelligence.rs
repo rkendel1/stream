@@ -4,7 +4,6 @@
 use anyhow::{anyhow, Result};
 use clap::{Subcommand, ValueEnum};
 use std::fmt::Write as _;
-use stream_appport::StreamAppPort;
 use stream_core::{NewContext, ObservationReport, SignalDetail, SignalSummary, StreamRuntime};
 use stream_model::{ConnectionRelation, ContextKind, ProcessingStage, SignalId, SignalStatus};
 
@@ -49,27 +48,6 @@ pub fn print_stage(stage: ProcessingStage) {
         return;
     }
     eprintln!("  {}…", stage.label());
-}
-
-pub async fn add(port: &StreamAppPort, url: &str, no_observe: bool) -> Result<String> {
-    let runtime = port.runtime();
-    let added = runtime.add_url(url, "cli").await?;
-    if added.existing {
-        eprintln!("Already known as {} — observing again.", added.source.id);
-    }
-    if no_observe {
-        return Ok(format!("{}\t{}\t{}", added.source.id, added.source.stage, added.source.canonical_url));
-    }
-    eprintln!("Analyzing…");
-    let report = runtime.observe_source(&added.source.id, Some(&print_stage)).await?;
-    let mut out = format_report(&report);
-    if let Some(signal_id) = &report.primary_signal_id {
-        if let Some(detail) = runtime.get_signal(signal_id).await? {
-            out.push_str("\n\n");
-            out.push_str(&format_card(&detail.summary));
-        }
-    }
-    Ok(out)
 }
 
 pub fn format_report(report: &ObservationReport) -> String {
@@ -334,10 +312,12 @@ pub async fn sources(runtime: &StreamRuntime) -> Result<String> {
         .iter()
         .map(|s| {
             format!(
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 s.id,
                 s.kind,
                 s.stage,
+                s.target_id.as_ref().map(|t| crate::observation::short_id(t.as_str())).unwrap_or("-"),
+                s.discovery_method.map(|m| m.as_str()).unwrap_or("-"),
                 s.title.as_deref().unwrap_or("-"),
                 s.canonical_url
             )

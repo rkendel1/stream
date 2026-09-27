@@ -132,7 +132,12 @@ pub fn parse_observation_target(input: &str) -> Result<ParsedObservationTarget, 
         }
         seed_url.set_path(&path);
     }
-    let canonical_url = canonicalize_url(seed_url.as_str())?;
+    let mut canonical_url = canonicalize_url(seed_url.as_str())?;
+    if scope == ObservationScope::Descendants && !canonical_url.path().ends_with('/') {
+        // The information surface *beneath* a URL: `https://x.com/devxritesh/status/`.
+        let path = format!("{}/", canonical_url.path());
+        canonical_url.set_path(&path);
+    }
     Ok(ParsedObservationTarget { seed_url, canonical_url, scope })
 }
 
@@ -465,11 +470,13 @@ mod tests {
 
         let path = parse("https://example.com/path/*");
         assert_eq!(path.scope, ObservationScope::Descendants);
-        assert_eq!(path.canonical_url.as_str(), "https://example.com/path");
+        assert_eq!(path.canonical_url.as_str(), "https://example.com/path/");
+        assert_eq!(path.display(), "https://example.com/path/*");
 
         let x = parse("https://x.com/devxritesh/status/*");
         assert_eq!(x.scope, ObservationScope::Descendants);
         assert_eq!(x.seed_url.as_str(), "https://x.com/devxritesh/status/");
+        assert_eq!(x.canonical_url.as_str(), "https://x.com/devxritesh/status/");
         assert_eq!(x.display(), "https://x.com/devxritesh/status/*");
     }
 

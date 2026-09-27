@@ -548,8 +548,8 @@ impl StreamRuntime {
         target.last_discovered_at = Some(now);
         target.next_discovery_at = Some(now + Duration::hours(target.discovery_policy.discover_every_hours as i64));
         target.discovery_detail = Some(format!(
-            "Watching {} information surfaces{}",
-            target.source_ids.len(),
+            "Found {}{}",
+            if target.source_ids.len() == 1 { "1 information surface".to_owned() } else { format!("{} information surfaces", target.source_ids.len()) },
             if new_sources.is_empty() { String::new() } else { format!(" ({} new)", new_sources.len()) }
         ));
         self.save_target(&mut target).await?;
@@ -890,7 +890,10 @@ impl StreamRuntime {
             signals_corroborated: 0,
             detail: String::new(),
         };
-        if !self.acquire_lease().await? {
+        // The lease keeps two processes from running the schedule at once. A
+        // run the user asked for, for one target, does not wait for it.
+        let scheduled = options.target_id.is_none();
+        if scheduled && !self.acquire_lease().await? {
             run.completed_at = Some(Utc::now());
             run.detail = "Another Stream process is observing right now; nothing to do here.".into();
             return Ok(run);
@@ -902,7 +905,9 @@ impl StreamRuntime {
             run.detail = format!("stopped early: {error:#}");
         }
         self.store.update("ObservationRun", run.id.as_str(), run_record(&run)).await?;
-        self.release_lease().await?;
+        if scheduled {
+            self.release_lease().await?;
+        }
         result.map(|_| run)
     }
 
@@ -919,7 +924,8 @@ impl StreamRuntime {
                 && target.discovery_started_at.map(|at| now - at > Duration::minutes(STALE_DISCOVERY_MINUTES)).unwrap_or(true);
             let due = target.next_discovery_at.map(|at| at <= now).unwrap_or(true)
                 && target.discovery_status != DiscoveryStatus::Running;
-            if (options.force && options.target_id.is_some()) || due || stale {
+            // Discovery keeps its own schedule; `force` forces observation only.
+            if due || stale {
                 self.discover_target(&target.id).await?;
                 run.targets_discovered += 1;
             }
@@ -1173,6 +1179,151 @@ impl StreamRuntime {
             .await?;
         let target = self.get_target(&added.target.id).await?.unwrap_or(discovery.target.clone());
         Ok(WatchOutcome { target, added, discovery: Some(discovery), run: Some(run), report: None })
+    }
+}
+
+/// One surface of a target, for people.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurfaceSummary {
+    pub source_id: SourceId,
+    pub kind: SurfaceKind,
+    pub label: String,
+    pub title: Option<String>,
+    pub url: Url,
+    pub health: SourceHealth,
+}
+
+/// A target as clients present it: the parsed URL and scope, side by side,
+/// never as a string the client must re-interpret.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetSummary {
+    pub id: TargetId,
+    /// The canonical URL (never contains the `/*` operator).
+    pub url: Url,
+    pub scope: ObservationScope,
+    /// The user-facing form: `https://example.com/*` for descendants.
+    pub display_url: String,
+    pub identity: stream_model::TargetIdentity,
+    pub title: Option<String>,
+    pub status: TargetStatus,
+    pub discovery_status: DiscoveryStatus,
+    pub discovery_detail: Option<String>,
+    /// "Watching 6 information surfaces", "Watching posts", "Discovering…".
+    pub watching: String,
+    pub surfaces: Vec<SurfaceSummary>,
+    pub signal_count: usize,
+    pub last_discovered_at: Option<DateTime<Utc>>,
+    pub next_discovery_at: Option<DateTime<Utc>>,
+    pub last_observed_at: Option<DateTime<Utc>>,
+    pub next_observation_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// How Stream understands an input before it is added.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetPreview {
+    pub id: TargetId,
+    pub url: Url,
+    pub scope: ObservationScope,
+    pub display_url: String,
+    pub identity: stream_model::TargetIdentity,
+}
+
+/// What Stream says it is doing for a target.
+pub fn watching_label(target: &ObservationTarget, surfaces: usize) -> String {
+    match target.status {
+        TargetStatus::Paused => return "Paused".into(),
+        TargetStatus::Unavailable => return "Observation unavailable".into(),
+        TargetStatus::Failed => return "Could not reach it yet — Stream will try again".into(),
+        TargetStatus::Pending | TargetStatus::Discovering if surfaces <= 1 && target.scope == ObservationScope::Descendants => {
+            return "Discovering…".into()
+        }
+        _ => {}
+    }
+    match (target.scope, target.identity.kind) {
+        (ObservationScope::Resource, _) => "Watching this resource".into(),
+        (_, stream_model::TargetKind::Account) => target.identity.watching.clone(),
+        _ if surfaces == 1 => "Watching 1 information surface".into(),
+        _ => format!("Watching {surfaces} information surfaces"),
+    }
+}
+
+impl StreamRuntime {
+    /// A target as clients present it.
+    pub async fn target_summary(&self, id: &TargetId) -> Result<Option<TargetSummary>> {
+        let Some(view) = self.target_view(id).await? else { return Ok(None) };
+        let surfaces = view
+            .sources
+            .iter()
+            .map(|w| {
+                let kind = w.source.surface_kind.unwrap_or(SurfaceKind::Page);
+                SurfaceSummary {
+                    source_id: w.source.id.clone(),
+                    kind,
+                    label: kind.label().to_owned(),
+                    title: w.source.title.clone(),
+                    url: w.source.canonical_url.clone(),
+                    health: w.health,
+                }
+            })
+            .collect::<Vec<_>>();
+        let target = view.target;
+        Ok(Some(TargetSummary {
+            id: target.id.clone(),
+            url: target.canonical_seed_url.clone(),
+            scope: target.scope,
+            display_url: target.display_url(),
+            watching: watching_label(&target, surfaces.len()),
+            identity: target.identity.clone(),
+            title: target.title.clone(),
+            status: target.status,
+            discovery_status: target.discovery_status,
+            discovery_detail: target.discovery_detail.clone(),
+            signal_count: view.signal_ids.len(),
+            surfaces,
+            last_discovered_at: target.last_discovered_at,
+            next_discovery_at: target.next_discovery_at,
+            last_observed_at: target.last_observed_at,
+            next_observation_at: target.next_observation_at,
+            created_at: target.created_at,
+        }))
+    }
+
+    pub async fn target_summaries(&self) -> Result<Vec<TargetSummary>> {
+        let mut summaries = Vec::new();
+        for target in self.list_targets().await? {
+            if let Some(summary) = self.target_summary(&target.id).await? {
+                summaries.push(summary);
+            }
+        }
+        Ok(summaries)
+    }
+
+    /// Parse and resolve what the user typed without adding anything: how
+    /// Stream understands it (URL, scope, provider identity).
+    pub fn preview_target(&self, raw: &str) -> Result<TargetPreview> {
+        let parsed = parse_observation_target(raw).map_err(|error| anyhow!(error))?;
+        check_url(&parsed.seed_url, self.network_policy()).map_err(|error| anyhow!("{error}"))?;
+        let plan = self.resolver.resolve(&parsed.seed_url, parsed.scope);
+        Ok(TargetPreview {
+            id: TargetId::for_url(parsed.canonical_url.as_str(), parsed.scope),
+            display_url: parsed.display(),
+            url: parsed.canonical_url,
+            scope: parsed.scope,
+            identity: plan.identity,
+        })
+    }
+
+    /// Find a target by id or unique id prefix (`target_1a2b`, `1a2b`).
+    pub async fn find_target(&self, id_or_prefix: &str) -> Result<Option<ObservationTarget>> {
+        let wanted = id_or_prefix.trim();
+        let wanted = if wanted.starts_with("target_") { wanted.to_owned() } else { format!("target_{wanted}") };
+        let matches = self.list_targets().await?.into_iter().filter(|t| t.id.as_str().starts_with(&wanted)).collect::<Vec<_>>();
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(matches.into_iter().next()),
+            n => bail!("{id_or_prefix} matches {n} targets; use more of the id"),
+        }
     }
 }
 

@@ -320,6 +320,7 @@ impl Collector<'_> {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn feed_surface(&self, url: Url, format: DocumentFormat, title: Option<String>, from: &Url, method: DiscoveryMethod, confidence: DiscoveryConfidence, reason: String) -> DiscoveredSurface {
         DiscoveredSurface {
             url: url.clone(),

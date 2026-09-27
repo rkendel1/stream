@@ -49,6 +49,43 @@ async fn the_desktop_bridge_is_the_appport_surface_not_a_second_data_path() {
 }
 
 #[tokio::test]
+async fn the_desktop_watches_an_information_surface_through_appport() {
+    let server = FixtureServer::start();
+    stream_testkit::product_site(&server, true);
+    let isolated = Isolated::new();
+    let bridge = DesktopBridge::new(StreamAppPort::new(runtime_at(&isolated)).with_provenance("desktop"));
+    let url = server.url("/*");
+
+    // The UI's add flow: parse (in Rust) → durable target → discover → observe.
+    let parsed = ask(&bridge, 1, "stream.target.parse", json!({ "url": url })).await;
+    assert_eq!(parsed["result"]["scope"], "descendants");
+    let added = ask(&bridge, 2, "stream.target.add", json!({ "url": url, "observe": false })).await;
+    let id = added["result"]["target"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(added["result"]["target"]["watching"], "Discovering…");
+    let discovered = ask(&bridge, 3, "stream.target.discover", json!({ "id": id })).await;
+    assert!(discovered["result"]["target"]["watching"].as_str().unwrap().starts_with("Watching "));
+    let run = ask(&bridge, 4, "stream.observation.run", json!({ "target_id": id, "force": true })).await;
+    assert!(run["result"]["sources_observed"].as_u64().unwrap() >= 5);
+
+    // New information arrives; the next observation brings it in as a signal.
+    let before = ask(&bridge, 5, "stream.signal.list", json!({})).await["result"].as_array().unwrap().len();
+    server.route(
+        "/feed.xml",
+        "application/rss+xml",
+        &stream_testkit::widget_feed(&[stream_testkit::WIDGET_POST_TWO_ZERO, stream_testkit::WIDGET_POST_WELCOME]),
+    );
+    ask(&bridge, 6, "stream.observation.run", json!({ "target_id": id, "force": true })).await;
+    let after = ask(&bridge, 7, "stream.signal.list", json!({})).await["result"].as_array().unwrap().len();
+    assert_eq!(after, before + 1);
+
+    // A restarted desktop sees the same targets, from FeltDB.
+    let restarted = DesktopBridge::new(StreamAppPort::new(runtime_at(&isolated)));
+    let targets = ask(&restarted, 8, "stream.target.list", json!({})).await;
+    assert_eq!(targets["result"][0]["id"], json!(id));
+    assert_eq!(targets["result"][0]["scope"], "descendants");
+}
+
+#[tokio::test]
 async fn bridge_errors_are_enveloped() {
     let isolated = Isolated::new();
     let bridge = DesktopBridge::new(StreamAppPort::new(runtime_at(&isolated)));
