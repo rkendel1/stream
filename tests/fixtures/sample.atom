@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Stream Atom</title>
+  <id>https://example.com/atom</id>
+  <updated>2026-09-27T00:00:00Z</updated>
+  <entry>
+    <title>AppPort update</title>
+    <id>https://example.com/entries/appport-update</id>
+    <updated>2026-09-27T00:00:00Z</updated>
+    <summary>AppPort SDK was updated.</summary>
+    <author><name>Example Atom</name></author>
+    <link href="https://example.com/entries/appport-update" />
+  </entry>
+</feed>

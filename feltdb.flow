@@ -5,14 +5,17 @@ app Stream {
     kind: text
     endpoint: text
     identity: text
-    capabilities: text
-    refresh_policy: text
-    authentication_reference: text
+    configuration: text
     status: text
+    refresh_minutes: integer
+    last_checked_at: datetime
     last_success_at: datetime
     last_failure_at: datetime
     last_error_category: text
-    provenance: text
+    last_error_message: text
+    consecutive_failures: integer
+    fetched_items_count: integer
+    duplicate_items_count: integer
     created_at: datetime
     updated_at: datetime
     index endpoint using hash(endpoint)
@@ -20,21 +23,37 @@ app Stream {
     index status using hash(status)
   }
 
+  collection FetchAttempt {
+    source: ref Source
+    attempted_at: datetime
+    completed_at: datetime
+    status: text
+    failure_category: text
+    item_count: integer
+    duplicate_count: integer
+    retained_count: integer
+    diagnostics: text
+    index source using hash(source)
+    index status using hash(status)
+  }
+
   collection Item {
     source: ref Source
+    source_kind: text
+    canonical_identity: text
     canonical_url: text
     title: text
     content_text: text
     content_html: text
     author_name: text
     published_at: datetime
-    source_kind: text
-    canonical_identity: text
     fingerprint: text
+    provenance_summary: text
     created_at: datetime
     updated_at: datetime
     index source using hash(source)
     index fingerprint using hash(fingerprint)
+    index canonical_identity using hash(canonical_identity)
     index published_at using sorted(published_at)
   }
 
@@ -43,8 +62,22 @@ app Stream {
     source: ref Source
     original_identifier: text
     source_url: text
-    fetched_at: datetime
+    observed_at: datetime
+    adapter_kind: text
+    index item using hash(item)
+    index source using hash(source)
+  }
+
+  collection Provenance {
+    item: ref Item
+    source: ref Source
+    source_url: text
+    observed_at: datetime
     parser: text
+    original_identifier: text
+    canonical_identifier: text
+    fingerprint: text
+    transformations: text
     index item using hash(item)
     index source using hash(source)
   }
@@ -57,6 +90,7 @@ app Stream {
     created_at: datetime
     index from_item using hash(from_item)
     index to_item using hash(to_item)
+    index relation using hash(relation)
   }
 
   collection ItemState {
@@ -76,28 +110,39 @@ app Stream {
 
   collection Rule {
     name: text
-    when_expression: text
-    then_action: text
-    retain_policy: text
-    status: text
+    enabled: text
+    source_filter: text
+    source_kind_filter: text
+    title_pattern: text
+    content_pattern: text
+    url_pattern: text
+    author_pattern: text
+    published_after: datetime
+    action: text
+    created_by: text
+    updated_by: text
     explanation: text
     created_at: datetime
     updated_at: datetime
-    index status using hash(status)
+    index enabled using hash(enabled)
+    index action using hash(action)
   }
 
   collection RuleExecution {
     rule: ref Rule
     item: ref Item
-    matched: text
-    explanation: text
     executed_at: datetime
+    result: text
+    failure: text
+    attention_event_id: text
     index rule using hash(rule)
     index item using hash(item)
+    index result using hash(result)
   }
 
   collection Subscription {
     source: ref Source
+    name: text
     query: text
     status: text
     created_at: datetime
@@ -111,6 +156,7 @@ app Stream {
     model: text
     decision_type: text
     decision: text
+    advisory_state: text
     confidence: text
     explanation: text
     created_at: datetime
@@ -128,34 +174,6 @@ app Stream {
     resolved_at: datetime
     index item using hash(item)
     index status using hash(status)
-  }
-
-  collection FetchAttempt {
-    source: ref Source
-    status: text
-    failure_category: text
-    started_at: datetime
-    finished_at: datetime
-    item_count: integer
-    duplicate_count: integer
-    retained_count: integer
-    error_message: text
-    index source using hash(source)
-    index status using hash(status)
-  }
-
-  collection Provenance {
-    item: ref Item
-    source: ref Source
-    source_url: text
-    fetched_at: datetime
-    parser: text
-    original_identifier: text
-    canonical_identifier: text
-    fingerprint: text
-    transformations: text
-    index item using hash(item)
-    index source using hash(source)
   }
 
   capability StreamSource {
@@ -232,63 +250,16 @@ app Stream {
     }
   }
 
-  policy Source {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy Item {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy ItemSource {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy ItemRelation {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy ItemState {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy Rule {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy RuleExecution {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy Subscription {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy SemanticDecision {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy AttentionEvent {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy FetchAttempt {
-    read: authenticated
-    write: authenticated
-  }
-
-  policy Provenance {
-    read: authenticated
-    write: authenticated
-  }
+  policy Source { read: authenticated write: authenticated }
+  policy FetchAttempt { read: authenticated write: authenticated }
+  policy Item { read: authenticated write: authenticated }
+  policy ItemSource { read: authenticated write: authenticated }
+  policy Provenance { read: authenticated write: authenticated }
+  policy ItemRelation { read: authenticated write: authenticated }
+  policy ItemState { read: authenticated write: authenticated }
+  policy Rule { read: authenticated write: authenticated }
+  policy RuleExecution { read: authenticated write: authenticated }
+  policy Subscription { read: authenticated write: authenticated }
+  policy SemanticDecision { read: authenticated write: authenticated }
+  policy AttentionEvent { read: authenticated write: authenticated }
 }

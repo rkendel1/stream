@@ -1,0 +1,12 @@
+[package]
+name = "stream-query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+stream-core = { path = "../stream-core" }
+stream-model = { path = "../stream-model" }
