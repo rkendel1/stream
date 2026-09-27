@@ -19,10 +19,12 @@ use stream_semantic::{HeuristicInterpreter, Interpreter, ModelInterpreter, Model
 
 mod intelligence;
 mod reasoning;
+mod observation;
 mod records;
 
 pub use intelligence::*;
 pub use reasoning::*;
+pub use observation::*;
 /// Provider types, re-exported so runtime hosts can configure a model
 /// without depending on the semantic crate directly.
 pub use stream_semantic::{ModelProvider as ModelProviderHandle, OpenAiCompatibleProvider, ProviderConfig};
@@ -293,6 +295,9 @@ pub struct StreamRuntime {
     fallback_synthesizer: Option<std::sync::Arc<dyn Synthesizer>>,
     reasoner: std::sync::Arc<dyn Reasoner>,
     fallback_reasoner: Option<std::sync::Arc<dyn Reasoner>>,
+    resolver: stream_discovery::ObservationTargetResolver,
+    /// Identifies this process as the holder of the observation worker lease.
+    worker_id: String,
 }
 
 impl StreamRuntime {
@@ -307,7 +312,16 @@ impl StreamRuntime {
             fallback_synthesizer: None,
             reasoner: std::sync::Arc::new(LocalReasoner),
             fallback_reasoner: None,
+            resolver: stream_discovery::ObservationTargetResolver::new(stream_discovery::ProviderEndpoints::from_env()),
+            worker_id: format!("worker_{}", uuid::Uuid::new_v4()),
         }
+    }
+
+    /// Replace the public observation endpoints used for providers without
+    /// an open feed of their own (e.g. X).
+    pub fn with_provider_endpoints(mut self, endpoints: stream_discovery::ProviderEndpoints) -> Self {
+        self.resolver = stream_discovery::ObservationTargetResolver::new(endpoints);
+        self
     }
 
     /// Replace the semantic provider. Interpretation stays advisory whichever
@@ -328,6 +342,16 @@ impl StreamRuntime {
         self.reasoner = std::sync::Arc::new(ModelReasoner::new(provider));
         self.fallback_reasoner = Some(std::sync::Arc::new(LocalReasoner));
         self
+    }
+
+    /// Replace the network policy every discovery and observation fetch obeys.
+    pub fn with_network_policy(mut self, policy: stream_ingest::NetworkPolicy) -> Self {
+        self.fetcher = HttpFetcher::new(policy);
+        self
+    }
+
+    pub fn network_policy(&self) -> &stream_ingest::NetworkPolicy {
+        self.fetcher.policy()
     }
 
     pub fn with_reasoner(mut self, reasoner: std::sync::Arc<dyn Reasoner>) -> Self {
@@ -960,6 +984,14 @@ fn source_record(source: &Source) -> Value {
         "provenance": source.provenance,
         "discovered_at": source.discovered_at.to_rfc3339(),
         "last_observed_at": source.last_observed_at.map(|value| value.to_rfc3339()).unwrap_or_default(),
+        "target": source.target_id.as_ref().map(|value| value.as_str()).unwrap_or_default(),
+        "surface_kind": source.surface_kind.map(|value| value.as_str()).unwrap_or_default(),
+        "discovery_method": source.discovery_method.map(|value| value.as_str()).unwrap_or_default(),
+        "discovery_confidence": source.discovery_confidence.map(|value| value.as_str()).unwrap_or_default(),
+        "discovered_from": source.discovered_from.as_ref().map(|value| value.as_str()).unwrap_or_default(),
+        "discovery_reason": source.discovery_reason.clone().unwrap_or_default(),
+        "relevant": source.relevant.to_string(),
+        "next_observation_at": source.next_observation_at.map(|value| value.to_rfc3339()).unwrap_or_default(),
         "configuration": source.configuration.to_string(),
         "status": source.status.to_string(),
         "refresh_minutes": source.refresh_minutes,
@@ -1004,6 +1036,15 @@ fn source_from_value(value: Value) -> Result<Source> {
         provenance: value_string_opt(&value, "provenance")?.unwrap_or_else(|| "configured".into()),
         discovered_at: value_datetime_opt(&value, "discovered_at")?.unwrap_or(created_at),
         last_observed_at: value_datetime_opt(&value, "last_observed_at")?,
+        target_id: value_string_opt(&value, "target")?.map(stream_model::TargetId::new),
+        surface_kind: value_string_opt(&value, "surface_kind")?.and_then(|v| stream_model::SurfaceKind::parse(&v)),
+        discovery_method: value_string_opt(&value, "discovery_method")?.and_then(|v| stream_model::DiscoveryMethod::parse(&v)),
+        discovery_confidence: value_string_opt(&value, "discovery_confidence")?
+            .and_then(|v| stream_model::DiscoveryConfidence::parse(&v)),
+        discovered_from: value_string_opt(&value, "discovered_from")?.and_then(|v| url::Url::parse(&v).ok()),
+        discovery_reason: value_string_opt(&value, "discovery_reason")?,
+        relevant: value_string_opt(&value, "relevant")?.map(|v| v != "false").unwrap_or(true),
+        next_observation_at: value_datetime_opt(&value, "next_observation_at")?,
         endpoint,
         identity: value_string(&value, "identity")?,
         configuration: serde_json::from_str(&value_string(&value, "configuration")?).unwrap_or_else(|_| json!({})),

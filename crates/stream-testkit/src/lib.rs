@@ -51,8 +51,11 @@ pub fn adapters() -> AdapterRegistry {
     AdapterRegistry::new(adapters)
 }
 
+/// Test runtimes talk to local fixture servers, so they opt into private
+/// (loopback) addresses; the default policy refuses them.
 pub fn runtime_at(isolated: &Isolated) -> StreamRuntime {
     StreamRuntime::new(FeltDbStore::new(isolated.config()), adapters())
+        .with_network_policy(stream_ingest::NetworkPolicy::default().allowing_private_network())
 }
 
 #[derive(Clone)]
@@ -60,6 +63,7 @@ struct Response {
     status: u16,
     content_type: String,
     body: String,
+    retry_after: Option<u64>,
 }
 
 /// A local HTTP server with mutable routes.
@@ -67,6 +71,7 @@ struct Response {
 pub struct FixtureServer {
     base: String,
     routes: Arc<Mutex<HashMap<String, Response>>>,
+    log: Arc<Mutex<Vec<String>>>,
 }
 
 impl FixtureServer {
@@ -75,10 +80,13 @@ impl FixtureServer {
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         let routes: Arc<Mutex<HashMap<String, Response>>> = Default::default();
         let shared = routes.clone();
+        let log: Arc<Mutex<Vec<String>>> = Default::default();
+        let shared_log = log.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let routes = shared.clone();
+                let log = shared_log.clone();
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
                     let mut request_line = String::new();
@@ -94,25 +102,29 @@ impl FixtureServer {
                         }
                     }
                     let path = request_line.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                    log.lock().unwrap().push(path.clone());
                     let response = routes.lock().unwrap().get(&path).cloned().unwrap_or(Response {
                         status: 404,
                         content_type: "text/plain".into(),
                         body: "not found".into(),
+                        retry_after: None,
                     });
+                    let retry_after = response.retry_after.map(|s| format!("Retry-After: {s}\r\n")).unwrap_or_default();
                     let reason = if response.status == 200 { "OK" } else { "Error" };
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
                         response.status,
                         reason,
                         response.content_type,
                         response.body.len(),
+                        retry_after,
                         response.body
                     );
                 });
             }
         });
-        Self { base, routes }
+        Self { base, routes, log }
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -127,6 +139,7 @@ impl FixtureServer {
                 status: 200,
                 content_type: content_type.to_owned(),
                 body: body.replace("{base}", &self.base),
+                retry_after: None,
             },
         );
         self.url(path)
@@ -139,9 +152,23 @@ impl FixtureServer {
     pub fn failing(&self, path: &str, status: u16) -> String {
         self.routes.lock().unwrap().insert(
             path.to_owned(),
-            Response { status, content_type: "text/plain".into(), body: "failure".into() },
+            Response { status, content_type: "text/plain".into(), body: "failure".into(), retry_after: None },
         );
         self.url(path)
+    }
+
+    /// Answer 429 with a Retry-After header.
+    pub fn rate_limited(&self, path: &str, retry_after_seconds: u64) -> String {
+        self.routes.lock().unwrap().insert(
+            path.to_owned(),
+            Response { status: 429, content_type: "text/plain".into(), body: "slow down".into(), retry_after: Some(retry_after_seconds) },
+        );
+        self.url(path)
+    }
+
+    /// Every path requested so far, in order.
+    pub fn requested(&self) -> Vec<String> {
+        self.log.lock().unwrap().clone()
     }
 }
 
@@ -438,3 +465,78 @@ pub const APPLE_CONTAINER_DENIAL: &str = r#"<!doctype html>
 <body><article>
   <p>Apple denies that Apple Container runs each Linux container in a lightweight virtual machine yet; the feature was delayed.</p>
 </article></body></html>"#;
+
+/// A small product site with the surfaces discovery should find, and some
+/// it should not (pricing, about, a robots-disallowed section, other sites).
+pub fn product_site(server: &FixtureServer, with_changelog_link: bool) {
+    let changelog_link = if with_changelog_link { r#"<a href="/changelog">Changelog</a>"# } else { "" };
+    server.html(
+        "/",
+        &format!(
+            r#"<!doctype html><html><head><title>Widget Co — portable compute runtime</title>
+<link rel="alternate" type="application/rss+xml" title="Widget Co" href="/feed.xml">
+</head><body>
+<nav><a href="/">Home</a> <a href="/blog">Blog</a> {changelog_link} <a href="/docs">Docs</a> <a href="/pricing">Pricing</a> <a href="/about">About</a> <a href="/private/updates">Updates</a></nav>
+<main><h1>Widget runs your workloads anywhere</h1>
+<p>Widget is a portable compute runtime with lightweight VMs for every workload.</p>
+<p>Source code on <a href="https://github.com/widgetco/widget">GitHub</a>. Also see <a href="https://other.example.net/blog">a partner blog</a>.</p></main>
+</body></html>"#
+        ),
+    );
+    server.route("/robots.txt", "text/plain", "User-agent: *\nDisallow: /private\nSitemap: {base}/sitemap.xml\n");
+    server.route(
+        "/sitemap.xml",
+        "application/xml",
+        r#"<?xml version="1.0"?><urlset>
+<url><loc>{base}/docs/intro</loc></url><url><loc>{base}/docs/api</loc></url><url><loc>{base}/docs/cli</loc></url>
+<url><loc>{base}/research/paper-1</loc></url><url><loc>{base}/about</loc></url></urlset>"#,
+    );
+    server.html(
+        "/blog",
+        r#"<!doctype html><html><head><title>Widget Blog</title>
+<link rel="alternate" type="application/atom+xml" href="/blog/atom.xml"></head>
+<body><main><h1>Widget Blog</h1><ul><li><a href="/blog/hello-widget">Hello, Widget</a></li></ul></main></body></html>"#,
+    );
+    server.html("/blog/hello-widget", r#"<!doctype html><html><head><title>Hello, Widget</title></head><body><article><p>Widget is here to run workloads anywhere.</p></article></body></html>"#);
+    server.html("/docs", r#"<!doctype html><html><head><title>Widget Docs</title></head><body><main><h1>Docs</h1><p>Install Widget with one command.</p></main></body></html>"#);
+    server.html("/pricing", "<html><body><p>Pricing</p></body></html>");
+    server.html("/about", "<html><body><p>About</p></body></html>");
+    server.html(
+        "/changelog",
+        r#"<!doctype html><html><head><title>Widget Changelog</title></head><body><main><h1>Changelog</h1>
+<h2>Version 1.4.1</h2><p>Fixes a crash when starting VMs on older Macs.</p></main></body></html>"#,
+    );
+    server.route("/feed.xml", "application/rss+xml", &widget_feed(&[WIDGET_POST_WELCOME]));
+    server.route("/blog/atom.xml", "application/atom+xml", r#"<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Widget Blog</title><id>{base}/blog</id><updated>2026-09-01T00:00:00Z</updated></feed>"#);
+}
+
+/// (guid, title, description, pubDate) of a feed entry.
+pub type FeedEntry<'a> = (&'a str, &'a str, &'a str, &'a str);
+
+pub const WIDGET_POST_WELCOME: FeedEntry<'static> = (
+    "welcome",
+    "Welcome to the Widget blog",
+    "We will write about Widget here.",
+    "Mon, 01 Sep 2026 09:00:00 GMT",
+);
+
+pub const WIDGET_POST_TWO_ZERO: FeedEntry<'static> = (
+    "widget-2",
+    "Introducing Widget 2.0",
+    "Widget 2.0 introduces portable compute snapshots that move running workloads between machines.",
+    "Sat, 26 Sep 2026 09:00:00 GMT",
+);
+
+/// An RSS feed of Widget blog posts, links resolved against `{base}`.
+pub fn widget_feed(entries: &[FeedEntry<'_>]) -> String {
+    let items = entries
+        .iter()
+        .map(|(guid, title, description, date)| {
+            format!(
+                "<item><guid>{guid}</guid><title>{title}</title><link>{{base}}/blog/{guid}</link><description>{description}</description><pubDate>{date}</pubDate></item>"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(r#"<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Widget Co</title><link>{{base}}/</link><description>News</description>{items}</channel></rss>"#)
+}

@@ -33,6 +33,94 @@ pub struct WebPage {
     pub published_at: Option<DateTime<Utc>>,
     pub text: String,
     pub feeds: Vec<DiscoveredFeed>,
+    /// Every http(s) link on the page, with its anchor text and whether it
+    /// sits in navigation chrome (nav/header/footer).
+    pub links: Vec<PageLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageLink {
+    pub url: Url,
+    pub text: String,
+    pub in_navigation: bool,
+}
+
+fn extract_links(document: &Html, base: &Url) -> Vec<PageLink> {
+    let mut links: Vec<PageLink> = Vec::new();
+    for anchor in document.select(&selector("a[href]")) {
+        let Some(href) = anchor.value().attr("href") else { continue };
+        let Ok(mut url) = base.join(href.trim()) else { continue };
+        if !matches!(url.scheme(), "http" | "https") {
+            continue;
+        }
+        url.set_fragment(None);
+        let text = normalize_whitespace(&anchor.text().collect::<Vec<_>>().join(" "));
+        let in_navigation = anchor.ancestors().any(|node| {
+            node.value().as_element().map(|e| matches!(e.name(), "nav" | "header" | "footer")).unwrap_or(false)
+        });
+        match links.iter_mut().find(|existing| existing.url == url) {
+            Some(existing) => {
+                existing.in_navigation |= in_navigation;
+                if existing.text.is_empty() {
+                    existing.text = text;
+                }
+            }
+            None => links.push(PageLink { url, text, in_navigation }),
+        }
+        if links.len() >= 2_000 {
+            break;
+        }
+    }
+    links
+}
+
+/// Normalize one block of page text for change detection: volatile tokens
+/// (timestamps, relative times, generated IDs, counters) are masked so that
+/// pages which re-render identically compare equal.
+pub fn normalize_block(block: &str) -> String {
+    let mut out = Vec::new();
+    let words = block.split_whitespace().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index];
+        let bare = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let lower = bare.to_ascii_lowercase();
+        let digits = bare.chars().filter(|c| c.is_ascii_digit()).count();
+        let hexish = bare.len() >= 16 && bare.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        let clock = bare.contains(':') && digits >= 3 && bare.chars().all(|c| c.is_ascii_digit() || c == ':');
+        let iso = digits >= 6 && bare.contains('T') && bare.contains('-');
+        let relative = digits > 0
+            && digits == bare.len()
+            && words
+                .get(index + 1)
+                .map(|next| {
+                    let next = next.trim_matches(|c: char| !c.is_alphanumeric()).to_ascii_lowercase();
+                    ["second", "seconds", "minute", "minutes", "hour", "hours", "sec", "secs", "min", "mins"].contains(&next.as_str())
+                })
+                .unwrap_or(false)
+            && words.get(index + 2).map(|w| w.to_ascii_lowercase().starts_with("ago")).unwrap_or(false);
+        if hexish || clock || iso {
+            out.push("#".to_owned());
+        } else if relative {
+            out.push("#".to_owned());
+            index += 3;
+            continue;
+        } else if lower == "just" && words.get(index + 1).map(|w| w.to_ascii_lowercase().starts_with("now")).unwrap_or(false) {
+            out.push("#".to_owned());
+            index += 2;
+            continue;
+        } else {
+            out.push(word.to_owned());
+        }
+        index += 1;
+    }
+    out.join(" ")
+}
+
+/// A page's content as normalized blocks, ready to compare with an earlier
+/// observation.
+pub fn normalized_blocks(page: &WebPage) -> Vec<String> {
+    page.text.lines().map(normalize_block).filter(|line| !line.trim().is_empty()).collect()
 }
 
 impl WebPage {
@@ -238,6 +326,7 @@ pub fn parse_page(url: &Url, html: &str) -> Result<WebPage> {
         published_at,
         text: main_text(&document),
         feeds: discover_feeds(&document, url),
+        links: extract_links(&document, url),
     })
 }
 
@@ -296,6 +385,26 @@ mod tests {
         assert!(page.text.contains("Adds OCI image support"));
         assert!(!page.text.contains("Subscribe"), "navigation is boilerplate");
         assert!(!page.text.contains("Copyright"), "footer is boilerplate");
+    }
+
+    #[test]
+    fn extracts_links_with_navigation_context() {
+        let url = Url::parse("https://example.com/news/apple-container").unwrap();
+        let html = r#"<html><body><nav><a href="/blog">Blog</a></nav><article><p>See <a href="/docs#intro">the docs</a>.</p></article></body></html>"#;
+        let page = parse_page(&url, html).unwrap();
+        assert_eq!(page.links.len(), 2);
+        assert_eq!(page.links[0].url.as_str(), "https://example.com/blog");
+        assert!(page.links[0].in_navigation);
+        assert_eq!(page.links[1].url.as_str(), "https://example.com/docs", "fragments are dropped");
+        assert!(!page.links[1].in_navigation);
+    }
+
+    #[test]
+    fn normalization_masks_volatile_tokens() {
+        assert_eq!(normalize_block("Updated 5 minutes ago by bot"), normalize_block("Updated 12 minutes ago by bot"));
+        assert_eq!(normalize_block("Rendered at 12:04:55 id 3f2a9c0d1e2b4a5f6c7d"), normalize_block("Rendered at 09:14:01 id 9a8b7c6d5e4f3a2b1c0d"));
+        assert_eq!(normalize_block("Built 2026-09-27T10:00:00Z"), normalize_block("Built 2026-09-28T11:30:00Z"));
+        assert_ne!(normalize_block("Version 1.4.1"), normalize_block("Version 1.5.0"), "versions are content, not noise");
     }
 
     #[test]

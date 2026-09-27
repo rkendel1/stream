@@ -25,8 +25,17 @@ app Stream {
     consecutive_failures: integer
     fetched_items_count: integer
     duplicate_items_count: integer
+    target: text
+    surface_kind: text
+    discovery_method: text
+    discovery_confidence: text
+    discovered_from: text
+    discovery_reason: text
+    relevant: text
+    next_observation_at: datetime
     created_at: datetime
     updated_at: datetime
+    index target using hash(target)
     index endpoint using hash(endpoint)
     index identity using hash(identity)
     index kind using hash(kind)
@@ -310,6 +319,106 @@ app Stream {
     index status using hash(status)
   }
 
+  collection ObservationTarget {
+    seed_url: text
+    canonical_seed_url: text
+    scope: text
+    display_url: text
+    provider: text
+    identity_kind: text
+    identity_key: text
+    display_name: text
+    watching: text
+    title: text
+    status: text
+    discovery_status: text
+    discovery_detail: text
+    discovery_started_at: datetime
+    last_discovered_at: datetime
+    next_discovery_at: datetime
+    last_observed_at: datetime
+    next_observation_at: datetime
+    consecutive_failures: integer
+    observe_every_minutes: integer
+    discover_every_hours: integer
+    max_sources: integer
+    contexts: text
+    sources: text
+    provenance: text
+    created_at: datetime
+    updated_at: datetime
+    index scope using hash(scope)
+    index status using hash(status)
+    index provider using hash(provider)
+  }
+
+  collection DiscoveryRelation {
+    target: ref ObservationTarget
+    source: ref Source
+    discovered_from: text
+    from_source: text
+    method: text
+    confidence: text
+    surface_kind: text
+    reason: text
+    discovered_at: datetime
+    last_confirmed_at: datetime
+    index target using hash(target)
+    index source using hash(source)
+  }
+
+  collection PageSnapshot {
+    source: ref Source
+    url: text
+    title: text
+    observed_at: datetime
+    content_hash: text
+    blocks: text
+    links: text
+    change: text
+    added: text
+    removed: text
+    summary: text
+    item: text
+    index source using hash(source)
+    index change using hash(change)
+  }
+
+  collection ObservationRun {
+    trigger: text
+    started_at: datetime
+    completed_at: datetime
+    targets_discovered: integer
+    sources_observed: integer
+    sources_failed: integer
+    new_items: integer
+    page_changes: integer
+    signals_created: integer
+    signals_corroborated: integer
+    detail: text
+  }
+
+  collection ObservationLease {
+    holder: text
+    expires_at: datetime
+  }
+
+  capability StreamObservation {
+    visibility public
+    read ObservationTarget
+    write ObservationTarget
+    read DiscoveryRelation
+    write DiscoveryRelation
+    read Source
+    write Source
+    read PageSnapshot
+    write PageSnapshot
+    read ObservationRun
+    write ObservationRun
+    read ObservationLease
+    write ObservationLease
+  }
+
   capability StreamSource {
     visibility public
     read Source
@@ -459,6 +568,41 @@ app Stream {
     }
   }
 
+  workflow TargetObservation {
+    step persist_target {
+      write ObservationTarget
+    }
+    step discover {
+      write Source
+      write DiscoveryRelation
+      write ObservationTarget
+    }
+    step acquire_worker {
+      write ObservationLease
+    }
+    step observe {
+      write FetchAttempt
+      write Item
+      write ItemSource
+      write Provenance
+      write PageSnapshot
+      write Source
+    }
+    step understand {
+      capability StreamContext
+      write SemanticDecision
+      write Signal
+      write Evidence
+      write Connection
+      write Claim
+    }
+    step schedule {
+      write Source
+      write ObservationTarget
+      write ObservationRun
+    }
+  }
+
   workflow Reasoning {
     step retrieve {
       capability StreamReasoning
@@ -491,4 +635,9 @@ app Stream {
   policy Synthesis { read: authenticated write: authenticated }
   policy Insight { read: authenticated write: authenticated }
   policy IntelligenceEvent { read: authenticated write: authenticated }
+  policy ObservationTarget { read: authenticated write: authenticated }
+  policy DiscoveryRelation { read: authenticated write: authenticated }
+  policy PageSnapshot { read: authenticated write: authenticated }
+  policy ObservationRun { read: authenticated write: authenticated }
+  policy ObservationLease { read: authenticated write: authenticated }
 }
