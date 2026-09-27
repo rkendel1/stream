@@ -6,5 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+stream-core = { path = "../stream-core" }
+stream-ingest = { path = "../stream-ingest" }
+stream-model = { path = "../stream-model" }
+stream-query = { path = "../stream-query" }
+stream-rss = { path = "../stream-rss" }
+stream-web = { path = "../stream-web" }
+
+[dev-dependencies]
+stream-testkit = { path = "../stream-testkit" }
+tokio.workspace = true

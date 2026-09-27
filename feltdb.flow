@@ -3,8 +3,17 @@ flow_version 1
 app Stream {
   collection Source {
     kind: text
+    adapter_kind: text
     endpoint: text
     identity: text
+    canonical_url: text
+    original_url: text
+    title: text
+    stage: text
+    stage_detail: text
+    provenance: text
+    discovered_at: datetime
+    last_observed_at: datetime
     configuration: text
     status: text
     refresh_minutes: integer
@@ -19,8 +28,10 @@ app Stream {
     created_at: datetime
     updated_at: datetime
     index endpoint using hash(endpoint)
+    index identity using hash(identity)
     index kind using hash(kind)
     index status using hash(status)
+    index stage using hash(stage)
   }
 
   collection FetchAttempt {
@@ -176,6 +187,71 @@ app Stream {
     index status using hash(status)
   }
 
+  collection ContextEntry {
+    name: text
+    name_key: text
+    kind: text
+    description: text
+    aliases: text
+    related: text
+    created_at: datetime
+    updated_at: datetime
+    index name_key using hash(name_key)
+    index kind using hash(kind)
+  }
+
+  collection Signal {
+    item: ref Item
+    topic: text
+    subject: text
+    subject_key: text
+    change_kind: text
+    change: text
+    why_it_matters: text
+    status: text
+    interpreter: text
+    advisory_state: text
+    confidence: text
+    created_at: datetime
+    updated_at: datetime
+    index item using hash(item)
+    index subject_key using hash(subject_key)
+    index status using hash(status)
+  }
+
+  collection Evidence {
+    signal: ref Signal
+    item: ref Item
+    source: ref Source
+    provenance: ref Provenance
+    url: text
+    claim: text
+    locator: text
+    excerpt: text
+    observed_at: datetime
+    created_at: datetime
+    index signal using hash(signal)
+    index item using hash(item)
+    index claim using hash(claim)
+  }
+
+  collection Connection {
+    signal: ref Signal
+    item: ref Item
+    target_kind: text
+    target_id: text
+    label: text
+    relation: text
+    strength: text
+    rationale: text
+    evidence: text
+    created_at: datetime
+    index signal using hash(signal)
+    index item using hash(item)
+    index target_id using hash(target_id)
+    index target_kind using hash(target_kind)
+  }
+
   capability StreamSource {
     visibility public
     read Source
@@ -220,6 +296,30 @@ app Stream {
     read RuleExecution
   }
 
+  capability StreamContext {
+    visibility public
+    read ContextEntry
+    write ContextEntry
+  }
+
+  capability StreamSignal {
+    visibility public
+    read Signal
+    read Evidence
+    read Connection
+    read Item
+    read Source
+    read Provenance
+  }
+
+  capability StreamConnection {
+    visibility public
+    read Connection
+    read ItemRelation
+    read ContextEntry
+    read Signal
+  }
+
   workflow SourceFetch {
     step record_attempt {
       write FetchAttempt
@@ -250,6 +350,30 @@ app Stream {
     }
   }
 
+  workflow UrlUnderstanding {
+    step persist_source {
+      write Source
+    }
+    step observe {
+      write FetchAttempt
+      write Item
+      write ItemSource
+      write Provenance
+    }
+    step read_context {
+      capability StreamContext
+    }
+    step persist_advisory_decision {
+      write SemanticDecision
+    }
+    step persist_signal {
+      write Signal
+      write Evidence
+      write Connection
+      write ItemRelation
+    }
+  }
+
   policy Source { read: authenticated write: authenticated }
   policy FetchAttempt { read: authenticated write: authenticated }
   policy Item { read: authenticated write: authenticated }
@@ -262,4 +386,8 @@ app Stream {
   policy Subscription { read: authenticated write: authenticated }
   policy SemanticDecision { read: authenticated write: authenticated }
   policy AttentionEvent { read: authenticated write: authenticated }
+  policy ContextEntry { read: authenticated write: authenticated }
+  policy Signal { read: authenticated write: authenticated }
+  policy Evidence { read: authenticated write: authenticated }
+  policy Connection { read: authenticated write: authenticated }
 }

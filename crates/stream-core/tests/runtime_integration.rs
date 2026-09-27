@@ -9,11 +9,11 @@ use uuid::Uuid;
 
 fn runtime_with_namespace(path: PathBuf, namespace: String) -> StreamRuntime {
     StreamRuntime::new(
-        FeltDbStore::new(FeltDbConfig {
+        FeltDbStore::new(FeltDbConfig::at(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../.."),
             namespace,
             path,
-            node_binary: "node".into(),
-        }),
+        )),
         AdapterRegistry::new(default_adapters()),
     )
 }

@@ -1,3 +1,5 @@
+pub mod ranking;
+
 use stream_model::{Item, Rule, RuleAction};
 
 pub fn rule_matches(rule: &Rule, item: &Item) -> bool {

@@ -7,5 +7,6 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+serde.workspace = true
 stream-model = { path = "../stream-model" }
 url.workspace = true
