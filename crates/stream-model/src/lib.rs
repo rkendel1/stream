@@ -9,8 +9,15 @@ use uuid::Uuid;
 
 mod canonical;
 mod intelligence;
+mod observation;
 
 pub use canonical::{canonicalize_url, classify_url, CanonicalUrlError};
+pub use observation::{
+    discovery_relation_id, display_target, parse_observation_target, DiscoveryConfidence, DiscoveryMethod,
+    DiscoveryRelation, DiscoveryStatus, ObservationPolicy, ObservationRun, ObservationRunId, ObservationScope,
+    ObservationTarget, ObservationTargetError, PageChange, PageSnapshot, ParsedObservationTarget, SnapshotId,
+    SurfaceKind, TargetId, TargetIdentity, TargetKind, TargetProvider, TargetStatus, SCOPE_OPERATOR,
+};
 pub use intelligence::{
     slug, Change, ChangeKind, ClaimBasis, ClaimKind, Connection, ConnectionRelation, ConnectionTargetKind,
     ContextEntry, ContextKind, Evidence, EvidenceLocator, Insight, InsightKind, InsightStatus, IntelligenceEvent,
@@ -408,6 +415,18 @@ pub struct Source {
     pub provenance: String,
     pub discovered_at: DateTime<Utc>,
     pub last_observed_at: Option<DateTime<Utc>>,
+    /// The observation target this surface was discovered for, if any.
+    pub target_id: Option<TargetId>,
+    /// What this surface is (blog, changelog, feed, ...), when discovered.
+    pub surface_kind: Option<SurfaceKind>,
+    pub discovery_method: Option<DiscoveryMethod>,
+    pub discovery_confidence: Option<DiscoveryConfidence>,
+    pub discovered_from: Option<Url>,
+    pub discovery_reason: Option<String>,
+    /// Whether Stream believes this surface is relevant to observe.
+    pub relevant: bool,
+    /// Durable schedule: when this source is next due for observation.
+    pub next_observation_at: Option<DateTime<Utc>>,
     pub configuration: Value,
     pub status: SourceStatus,
     pub refresh_minutes: u32,
@@ -439,6 +458,14 @@ impl Source {
             provenance: "configured".into(),
             discovered_at: now,
             last_observed_at: None,
+            target_id: None,
+            surface_kind: None,
+            discovery_method: None,
+            discovery_confidence: None,
+            discovered_from: None,
+            discovery_reason: None,
+            relevant: true,
+            next_observation_at: None,
             endpoint,
             configuration: json!({}),
             status: SourceStatus::Active,

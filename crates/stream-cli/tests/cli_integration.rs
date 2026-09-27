@@ -126,3 +126,52 @@ async fn ask_insights_and_doctor() {
     let doctor = stream(&port, &["doctor"]).await;
     assert!(doctor.contains("- intelligence: local"), "{doctor}");
 }
+
+#[tokio::test]
+async fn observation_targets_from_the_command_line() {
+    let server = FixtureServer::start();
+    stream_testkit::product_site(&server, true);
+    let isolated = Isolated::new();
+    let port = StreamAppPort::new(runtime_at(&isolated));
+
+    let site = server.url("/*");
+    let added = stream(&port, &["add", &site]).await;
+    for expected in ["Added observation target", "Scope: descendants", "Status: active", "Watching ", "information surfaces", "Discovered surfaces:", "Blog", "Changelog", "Documentation", "Feed"] {
+        assert!(added.contains(expected), "missing {expected:?} in\n{added}");
+    }
+
+    let resource = stream(&port, &["add", &server.url("/docs")]).await;
+    assert!(resource.contains("Target   target_") && resource.contains("(scope: resource)"), "{resource}");
+
+    let targets = stream(&port, &["targets"]).await;
+    assert!(targets.starts_with("ID"), "{targets}");
+    let site_row = targets.lines().find(|l| l.contains("descendants")).expect("descendants row");
+    let port_suffix = format!("{}/*", &site[site.rfind(':').unwrap()..site.len() - 2]);
+    assert!(site_row.contains(&port_suffix), "the target shows with its /* scope: {site_row}");
+    assert!(targets.lines().any(|l| l.contains("resource") && l.contains("/docs")), "{targets}");
+
+    let short = site_row.split_whitespace().next().unwrap();
+    let shown = stream(&port, &["target", short]).await;
+    for expected in ["Target — Widget Co", "Scope: descendants", "Discovered surfaces:"] {
+        assert!(shown.contains(expected), "missing {expected:?} in\n{shown}");
+    }
+    let url_line = shown.lines().find(|l| l.contains("URL:")).unwrap();
+    assert!(!url_line.contains('*'), "the URL itself never carries the operator: {url_line}");
+    let sources = stream(&port, &["target", short, "sources"]).await;
+    assert!(sources.contains("html_feed_declaration") && sources.contains("Why: "), "{sources}");
+    assert!(stream(&port, &["target", short, "pause"]).await.contains("Status: paused"));
+    assert!(stream(&port, &["target", short, "resume"]).await.contains("Status: active"));
+
+    let observed = stream(&port, &["observe"]).await;
+    assert!(observed.starts_with("Observed 0 source(s)"), "nothing is due right after adding: {observed}");
+    assert!(stream(&port, &["sources"]).await.contains("navigation_link"));
+    assert!(stream(&port, &["doctor"]).await.contains("- observation: 2 target(s)"));
+
+    let x = Cli::try_parse_from(["stream", "add", "https://x.com/devxritesh/status/*", "--no-observe"]).unwrap();
+    let x = run_with(x, &port).await.unwrap();
+    for expected in ["Added observation target", "X / @devxritesh", "Scope: descendants", "Status: pending"] {
+        assert!(x.contains(expected), "missing {expected:?} in\n{x}");
+    }
+    let bad = Cli::try_parse_from(["stream", "add", "https://example.com/foo*bar"]).unwrap();
+    assert!(run_with(bad, &port).await.is_err());
+}

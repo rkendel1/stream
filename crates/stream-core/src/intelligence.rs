@@ -38,6 +38,17 @@ pub const MAX_PRIOR_ITEMS: usize = 200;
 
 pub type ProgressFn<'a> = &'a (dyn Fn(ProcessingStage) + Send + Sync);
 
+/// How new an observed item is, which decides whether it may become a signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Novelty {
+    /// The URL the user added: always understood into a signal.
+    Primary,
+    /// New since the last observation of a watched surface.
+    Fresh,
+    /// Present the first time a surface was observed: context only.
+    Baseline,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddUrlOutcome {
     pub source: Source,
@@ -68,6 +79,12 @@ pub struct ObservationReport {
     /// Plain-language notes about degraded intelligence (no provider details).
     #[serde(default)]
     pub notices: Vec<String>,
+    /// For web pages: how this observation compares with the previous one.
+    #[serde(default)]
+    pub page_change: Option<stream_model::PageChange>,
+    /// New downstream sources registered by this observation.
+    #[serde(default)]
+    pub registered_sources: Vec<SourceId>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -569,7 +586,7 @@ impl StreamRuntime {
         self.observe_source(&added.source.id, progress).await
     }
 
-    async fn find_source_by_identity(&self, identity: &str) -> Result<Option<Source>> {
+    pub(crate) async fn find_source_by_identity(&self, identity: &str) -> Result<Option<Source>> {
         self.store
             .find("Source", json!({ "identity": identity }))
             .await?
@@ -579,7 +596,7 @@ impl StreamRuntime {
             .transpose()
     }
 
-    async fn set_stage(
+    pub(crate) async fn set_stage(
         &self,
         source: &mut Source,
         stage: ProcessingStage,
@@ -643,6 +660,8 @@ impl StreamRuntime {
             understood_without_signal: vec![],
             rejected: vec![],
             notices: vec![],
+            page_change: None,
+            registered_sources: vec![],
         };
         if let Err(error) = self.observe_inner(&mut source, &mut report, progress).await {
             let message = format!("{error:#}");
@@ -663,6 +682,16 @@ impl StreamRuntime {
         report: &mut ObservationReport,
         progress: Option<ProgressFn<'_>>,
     ) -> Result<()> {
+        let user_resource = source.discovery_method == Some(stream_model::DiscoveryMethod::UserAdded);
+        if source.target_id.is_some()
+            && (!user_resource || (source.last_observed_at.is_some() && !source.adapter_kind.is_feed_format()))
+        {
+            // A surface of an observation target: page snapshots, fresh
+            // items, downstream pages, durable scheduling. (A resource the
+            // user added is first observed exactly as it always has been;
+            // after that its page is compared snapshot to snapshot.)
+            return self.observe_watched(source, report, progress).await;
+        }
         source.last_checked_at = Some(Utc::now());
         self.set_stage(source, ProcessingStage::Fetching, None, progress).await?;
         let mut attempt = FetchAttempt::started(source.id.clone());
@@ -777,14 +806,23 @@ impl StreamRuntime {
         report.items_observed = outcomes.len();
         report.new_item_ids = outcomes.iter().filter(|o| o.is_new).map(|o| o.item.id.clone()).collect();
 
-        let mut candidates: Vec<(Item, bool)> = Vec::new();
+        let mut candidates: Vec<(Item, Novelty)> = Vec::new();
         for (index, outcome) in outcomes.into_iter().enumerate() {
             let primary = has_primary && index == 0;
             if primary {
                 report.primary_item_id = Some(outcome.item.id.clone());
             }
             if (primary || outcome.is_new) && !candidates.iter().any(|(item, _)| item.id == outcome.item.id) {
-                candidates.push((outcome.item, primary));
+                // Entries that appear on a resource the user watches, after the
+                // first observation, are new information.
+                let novelty = if primary {
+                    Novelty::Primary
+                } else if source.target_id.is_some() && !first_observation {
+                    Novelty::Fresh
+                } else {
+                    Novelty::Baseline
+                };
+                candidates.push((outcome.item, novelty));
             }
         }
 
@@ -792,6 +830,9 @@ impl StreamRuntime {
 
         source.last_observed_at = Some(Utc::now());
         source.status = SourceStatus::Active;
+        if source.target_id.is_some() {
+            source.next_observation_at = Some(Utc::now() + chrono::Duration::minutes(self.observe_interval(source).await? as i64));
+        }
         let detail = match (report.signals_created.len(), report.signals_corroborated.len()) {
             (0, 0) if report.items_observed == 0 => "Nothing new observed".to_owned(),
             (0, 0) => format!("{} observed; nothing connected to your context yet", plural(report.items_observed, "item")),
@@ -802,7 +843,7 @@ impl StreamRuntime {
         self.set_stage(source, ProcessingStage::Observed, Some(detail), progress).await
     }
 
-    fn parse_feed(&self, source: &Source, body: &[u8]) -> Result<Vec<NormalizedItem>> {
+    pub(crate) fn parse_feed(&self, source: &Source, body: &[u8]) -> Result<Vec<NormalizedItem>> {
         let adapter = self.adapters.adapter_for(source)?;
         let mut items = adapter.parse(source, body, Utc::now())?;
         items.sort_by(|a, b| b.published_at.cmp(&a.published_at));
@@ -843,10 +884,10 @@ impl StreamRuntime {
         Ok(prior)
     }
 
-    async fn understand(
+    pub(crate) async fn understand(
         &self,
         source: &mut Source,
-        candidates: Vec<(Item, bool)>,
+        candidates: Vec<(Item, Novelty)>,
         report: &mut ObservationReport,
         progress: Option<ProgressFn<'_>>,
     ) -> Result<()> {
@@ -861,7 +902,8 @@ impl StreamRuntime {
             .collect::<HashMap<_, _>>();
         let mut stage = ProcessingStage::Understanding;
 
-        for (item, primary) in candidates.into_iter().take(MAX_FEED_ITEMS_PER_OBSERVATION + 1) {
+        for (item, novelty) in candidates.into_iter().take(MAX_FEED_ITEMS_PER_OBSERVATION + 1) {
+            let primary = novelty == Novelty::Primary;
             if let Some(signal_id) = signal_of_item.get(&item.id) {
                 if primary {
                     report.primary_signal_id = Some(signal_id.clone());
@@ -888,7 +930,13 @@ impl StreamRuntime {
                         .and_then(|candidate| candidate.signal_id.clone())
                         .map(|signal_id| (signal_id, link.clone()))
                 });
-            let meaningful = primary || !interpretation.context_matches.is_empty() || consolidation.is_some();
+            // Signals only when meaningful: the user's own URL, a connection to
+            // their context, corroboration of a known change, or a concrete
+            // change freshly observed on a surface they asked Stream to watch.
+            let meaningful = primary
+                || !interpretation.context_matches.is_empty()
+                || consolidation.is_some()
+                || (novelty == Novelty::Fresh && interpretation.change.value.kind != stream_model::ChangeKind::Describes);
             self.record_decisions(&item, &verified, meaningful, &interpreter_id).await?;
             if !meaningful {
                 report.understood_without_signal.push(item.id.clone());

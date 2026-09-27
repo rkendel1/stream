@@ -1,0 +1,17 @@
+[package]
+name = "stream-discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bounded, explainable discovery of the information surfaces downstream of a URL."
+
+[dependencies]
+stream-ingest = { path = "../stream-ingest" }
+stream-model = { path = "../stream-model" }
+stream-web = { path = "../stream-web" }
+url.workspace = true
+
+[dev-dependencies]
+stream-testkit = { path = "../stream-testkit" }
+tokio.workspace = true

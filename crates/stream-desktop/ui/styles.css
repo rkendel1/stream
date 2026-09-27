@@ -100,6 +100,14 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .composer select { flex: 0 0 auto; }
 .hint { margin: 0; color: var(--muted); font-size: 13px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+.preview { margin: 0; font-size: 13px; padding: 7px 10px; border-radius: 8px; background: var(--surface-2); color: var(--ink-2); overflow-wrap: anywhere; }
+.preview.scope-descendants { background: var(--accent-soft); }
+.preview.invalid { background: var(--bad-soft); color: var(--bad); }
+.scope-help { font-size: 13px; color: var(--muted); }
+.scope-help p { margin: 0 0 4px; }
+.scope-help ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.scope-help li span { margin-left: 4px; }
 
 .today-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 8px 0 14px; flex-wrap: wrap; }
 .today-head h1 { margin: 0; font-size: 26px; letter-spacing: -.02em; }
@@ -184,6 +192,29 @@ button:disabled { opacity: .55; cursor: default; }
 .stage { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); height: fit-content; }
 .stage.observed { color: var(--good); }
 .stage.failed { color: var(--bad); background: var(--bad-soft); }
+/* Observation targets */
+.target {
+  padding: 14px 16px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); margin-bottom: 12px; box-shadow: var(--shadow); display: grid; gap: 8px;
+}
+.target-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.target-name { font-weight: 600; font-size: 17px; overflow-wrap: anywhere; }
+.watching { margin: 6px 0 0; font-weight: 600; color: var(--ink-2); }
+.target .watching { margin: 0; }
+.surfaces { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.surfaces li { display: inline-flex; gap: 6px; align-items: baseline; font-size: 14px; }
+.mark { font-weight: 700; color: var(--muted); width: 1em; text-align: center; }
+.health-healthy > .mark, .health-healthy .mark { color: var(--good); }
+.health-retrying .mark { color: var(--warn); }
+.health-unavailable .mark { color: var(--bad); }
+.target-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.why-watch summary { cursor: pointer; font-size: 14px; color: var(--accent); }
+.watched { list-style: none; margin: 8px 0 0; padding: 0 0 0 12px; border-left: 2px solid var(--line); display: grid; gap: 10px; }
+.watched p { margin: 2px 0 0 22px; }
+.watched-head { display: flex; gap: 6px; align-items: baseline; overflow-wrap: anywhere; }
+.change-note { color: var(--ink-2); }
+.stage.active { color: var(--good); }
+.stage.unavailable, .stage.paused { color: var(--warn); }
 .source-error { grid-column: 1 / -1; font-size: 13px; color: var(--bad); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 
 /* Connections */

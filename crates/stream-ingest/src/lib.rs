@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use reqwest::Client;
-use std::time::Duration;
 use stream_model::{NormalizedItem, Source, SourceKind};
 use url::Url;
+
+pub mod net;
+
+pub use net::{check_url, is_private_ip, FetchError, HttpFetcher, NetworkPolicy};
 
 /// Upper bound on a fetched document. Stream observes documents, it does not crawl.
 pub const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
@@ -32,49 +34,13 @@ pub struct FetchedDocument {
     pub fetched_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone)]
-pub struct HttpFetcher {
-    client: Client,
-}
-
-impl Default for HttpFetcher {
-    fn default() -> Self {
-        Self {
-            client: Client::builder()
-                .user_agent(concat!("stream-runtime/", env!("CARGO_PKG_VERSION")))
-                .timeout(Duration::from_secs(30))
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .expect("reqwest client should build"),
-        }
-    }
-}
-
 impl HttpFetcher {
     pub async fn fetch(&self, source: &Source) -> Result<Vec<u8>> {
         Ok(self.fetch_url(&source.endpoint).await?.body)
     }
 
     pub async fn fetch_url(&self, url: &Url) -> Result<FetchedDocument> {
-        let response = self.client.get(url.clone()).send().await?;
-        let response = response.error_for_status()?;
-        let final_url = response.url().clone();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.to_ascii_lowercase());
-        let body = response.bytes().await?;
-        if body.len() > MAX_DOCUMENT_BYTES {
-            return Err(anyhow!("document exceeds {} bytes", MAX_DOCUMENT_BYTES));
-        }
-        Ok(FetchedDocument {
-            requested_url: url.clone(),
-            final_url,
-            content_type,
-            body: body.to_vec(),
-            fetched_at: Utc::now(),
-        })
+        Ok(self.fetch_document(url).await?)
     }
 }
 

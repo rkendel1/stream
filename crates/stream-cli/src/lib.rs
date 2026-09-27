@@ -8,8 +8,10 @@ use stream_query::StreamQueryService;
 use std::path::Path;
 
 mod intelligence;
+mod observation;
 
 pub use intelligence::{ContextCommand, ContextKindArg};
+pub use observation::TargetAction;
 
 #[derive(Debug, Parser)]
 #[command(name = "stream")]
@@ -21,10 +23,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Add a URL: Stream determines what it is, observes it, and builds signals.
+    /// Add a URL. `https://example.com` watches that resource;
+    /// `'https://example.com/*'` watches the information surface beneath it
+    /// (Stream discovers its blog, changelog, feeds, releases, …).
     Add {
         url: String,
-        /// Only establish the durable source; do not fetch yet.
+        /// Only establish the durable target; do not fetch yet.
         #[arg(long)]
         no_observe: bool,
     },
@@ -59,6 +63,27 @@ pub enum Command {
     },
     /// Sources Stream observes, with their processing stage.
     Sources,
+    /// Observation targets and their scope.
+    Targets {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One observation target: `stream target <id> [show|discover|sources|pause|resume]`.
+    Target {
+        id: String,
+        #[arg(value_enum, default_value_t = TargetAction::Show)]
+        action: TargetAction,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Observe what is due now (durable schedule), or keep observing with --watch.
+    Observe {
+        #[arg(long)]
+        watch: bool,
+        /// Observe every watched source now, due or not.
+        #[arg(long)]
+        all: bool,
+    },
     /// Ask Stream about what it knows. Answers cite evidence and say when
     /// evidence is insufficient.
     Ask {
@@ -219,7 +244,10 @@ pub async fn run(cli: Cli, repo_root: impl AsRef<Path>) -> Result<String> {
 pub async fn run_with(cli: Cli, port: &StreamAppPort) -> Result<String> {
     let runtime = port.runtime();
     match cli.command {
-        Command::Add { url, no_observe } => intelligence::add(port, &url, no_observe).await,
+        Command::Add { url, no_observe } => observation::add(port, &url, no_observe).await,
+        Command::Targets { json } => observation::targets(runtime, json).await,
+        Command::Target { id, action, json } => observation::target(runtime, &id, action, json).await,
+        Command::Observe { watch, all } => observation::observe(runtime, watch, all).await,
         Command::Signals { all, json } => intelligence::signals(runtime, all, json).await,
         Command::Signal { id, json, resolve, dismiss } => intelligence::signal(runtime, &id, json, resolve, dismiss).await,
         Command::Context { command } => intelligence::context(runtime, command).await,
@@ -385,6 +413,7 @@ async fn run_doctor(runtime: &StreamRuntime) -> Result<String> {
         "- rule failures: 0".to_string(),
         "- delivery failures: 0".to_string(),
         intelligence::doctor_line(runtime).await?,
+        observation::doctor_line(runtime).await?,
     ]
     .join("\n"))
 }

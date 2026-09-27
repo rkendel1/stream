@@ -25,6 +25,8 @@ fn main() -> Result<()> {
     }
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let bridge = DesktopBridge::from_env();
+    // Observation continues while Stream is open; schedules live in FeltDB.
+    let _worker = bridge.start_observation_worker(runtime.handle());
 
     if args.iter().any(|arg| arg == "--serve") || !cfg!(feature = "native") {
         let port = args

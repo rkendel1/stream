@@ -47,6 +47,8 @@ macro_rules! text_enum {
     };
 }
 
+pub(crate) use text_enum;
+
 text_enum!(ProcessingStage {
     Queued => "queued",
     Fetching => "fetching",

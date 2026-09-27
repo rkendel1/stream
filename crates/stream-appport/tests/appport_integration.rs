@@ -199,3 +199,54 @@ async fn chat_reasoning_and_insights_work_through_appport_without_exposing_the_p
         assert!(!payload.contains("fake-model"), "AppPort exposes Stream's capability, not the provider");
     }
 }
+
+#[tokio::test]
+async fn observation_targets_expose_url_and_scope_separately() {
+    let server = FixtureServer::start();
+    stream_testkit::product_site(&server, true);
+    let isolated = Isolated::new();
+    let port = StreamAppPort::new(runtime_at(&isolated)).with_provenance("appport-test");
+
+    // The client sends the user's syntax; it never interprets `/*` itself.
+    let preview = ok(&port, "stream.target.parse", json!({ "url": server.url("/*") })).await;
+    assert_eq!(preview["scope"], "descendants");
+    assert!(!preview["url"].as_str().unwrap().contains('*'));
+    let x = ok(&port, "stream.target.parse", json!({ "url": "https://x.com/devxritesh/status/*" })).await;
+    assert_eq!((x["identity"]["provider"].as_str(), x["identity"]["kind"].as_str()), (Some("x"), Some("account")));
+    assert_eq!(x["identity"]["display_name"], "@devxritesh");
+    let bad = port.invoke("stream.target.parse", json!({ "url": server.url("/foo*bar") })).await.unwrap_err();
+    assert_eq!(bad.code, ErrorCode::InvalidInput);
+
+    let added = ok(&port, "stream.target.add", json!({ "url": server.url("/*"), "observe": false })).await;
+    let id = added["target"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(added["target"]["scope"], "descendants");
+    assert_eq!(added["target"]["watching"], "Discovering…");
+
+    let discovered = ok(&port, "stream.target.discover", json!({ "id": id })).await;
+    assert!(discovered["new_sources"].as_array().unwrap().len() >= 5, "{discovered}");
+    let run = ok(&port, "stream.observation.run", json!({ "target_id": id, "force": true })).await;
+    assert!(run["sources_observed"].as_u64().unwrap() >= 5, "{run}");
+
+    let got = ok(&port, "stream.target.get", json!({ "id": &id[..14] })).await;
+    assert!(got["target"]["watching"].as_str().unwrap().starts_with("Watching "), "{}", got["target"]["watching"]);
+    let labels = got["target"]["surfaces"].as_array().unwrap().iter().map(|s| s["label"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    for label in ["Blog", "Changelog", "Documentation", "Feed"] {
+        assert!(labels.iter().any(|l| l == label), "{label} in {labels:?}");
+    }
+    let sources = ok(&port, "stream.target.sources", json!({ "id": id })).await;
+    assert!(sources.as_array().unwrap().iter().all(|s| !s["why"].as_str().unwrap().is_empty()));
+
+    let resource = ok(&port, "stream.target.add", json!({ "url": server.url("/") })).await;
+    assert_eq!(resource["target"]["scope"], "resource");
+    assert_eq!(resource["target"]["watching"], "Watching this resource");
+    assert_ne!(resource["target"]["id"], json!(id));
+
+    let list = ok(&port, "stream.target.list", json!({})).await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    let paused = ok(&port, "stream.target.pause", json!({ "id": id })).await;
+    assert_eq!(paused["status"], "paused");
+    let resumed = ok(&port, "stream.target.resume", json!({ "id": id })).await;
+    assert_eq!(resumed["status"], "active");
+    let status = ok(&port, "stream.observation.status", json!({})).await;
+    assert_eq!(status["targets"], 2);
+}
