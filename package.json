@@ -1,0 +1,29 @@
+{
+  "name": "stream",
+  "version": "0.1.0",
+  "description": "Stream: a local-first information runtime built on FeltDB and AppPort.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./appport": "./src/appport.js",
+    "./feltdb": "./src/feltdb.js",
+    "./stream": "./src/stream.js"
+  },
+  "bin": {
+    "stream": "./src/cli.js"
+  },
+  "scripts": {
+    "build": "npm run feltdb:validate && npm test",
+    "test": "node --test",
+    "feltdb": "feltdb",
+    "feltdb:validate": "feltdb validate"
+  },
+  "dependencies": {
+    "@appport/sdk": "^1.1.21",
+    "@feltdb/core": "^0.11.8"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
