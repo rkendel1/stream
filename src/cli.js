@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { fileURLToPath } from 'node:url';
+
 import { createMemoryStreamService } from './appport.js';
 
 export const STREAM_COMMANDS = [
-  'stream source add <endpoint>',
+  'stream source add <endpoint> [kind]',
   'stream source list',
   'stream sync',
   'stream item list',
@@ -59,10 +61,10 @@ export async function runCli(argv, service = createMemoryStreamService()) {
     return formatDoctorReport();
   }
 
-  return `Unsupported command: ${[command, subcommand].filter(Boolean).join(' ')}`;
+  return `Unsupported command: ${[command, subcommand, ...rest].filter(Boolean).join(' ')}`;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   runCli(process.argv.slice(2)).then(output => {
     if (output) console.log(output);
   }).catch(error => {

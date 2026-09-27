@@ -16,7 +16,7 @@ export const STREAM_COLLECTIONS = {
 };
 
 export function configureStreamDevelopmentBridge(env = detectEnvironment()) {
-  if (!env.VITE_FELTDB_DEV_SESSION_ID && !env.VITE_FELTDB_NAMESPACE && !env.VITE_FELTDB_RUNTIME) {
+  if (!env.VITE_FELTDB_DEV_SESSION_ID && !env.VITE_FELTDB_WORKSPACE_ID && !env.VITE_FELTDB_DEV_BRIDGE_URL) {
     return false;
   }
 
@@ -34,6 +34,8 @@ export function configureStreamDevelopmentBridge(env = detectEnvironment()) {
 }
 
 export function createStreamDatabase(options = {}) {
+  const env = options.env ?? detectEnvironment();
+  configureStreamDevelopmentBridge(env);
   const database = options.db ?? createFeltDB();
   return {
     db: database,

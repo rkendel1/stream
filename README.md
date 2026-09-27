@@ -15,7 +15,7 @@ This MVP foundation uses the requested stack:
 
 ## Authoritative model
 
-`/home/runner/work/stream/stream/feltdb.flow` is the canonical product model. It defines the durable collections and capability boundaries for:
+`feltdb.flow` is the canonical product model. It defines the durable collections and capability boundaries for:
 
 - sources
 - normalized items
@@ -30,7 +30,7 @@ This MVP foundation uses the requested stack:
 
 ## Library surface
 
-`/home/runner/work/stream/stream/src/stream.js` contains the initial domain helpers for:
+`src/stream.js` contains the initial domain helpers for:
 
 - canonical source records
 - canonical item records
@@ -38,7 +38,7 @@ This MVP foundation uses the requested stack:
 - search filtering
 - attention summaries
 
-`/home/runner/work/stream/stream/src/appport.js` defines the portable AppPort capabilities:
+`src/appport.js` defines the portable AppPort capabilities:
 
 - `stream.source`
 - `stream.item`
@@ -50,7 +50,7 @@ These capabilities keep Stream transport-neutral and make the relationship to Ap
 
 ## CLI surface
 
-`/home/runner/work/stream/stream/src/cli.js` establishes the first-class CLI command surface described in the product specification, including `stream doctor` for observable failure reporting.
+`src/cli.js` establishes the first-class CLI command surface described in the product specification, including `stream doctor` for observable failure reporting.
 
 ## Validation
 

@@ -95,7 +95,8 @@ const searchCapability = defineCapability({
     query: s.string(),
     source: s.optional(s.string()),
     source_kind: s.optional(s.string()),
-    after: s.optional(s.string())
+    after: s.optional(s.string()),
+    state: s.optional(s.string())
   }),
   output: s.object({
     items: s.array(s.record(s.unknown()))
@@ -125,38 +126,64 @@ export function createMemoryStreamService(seed = {}) {
   const items = [...(seed.items ?? [])];
   const itemStates = [...(seed.itemStates ?? [])];
 
+  const latestStateByItem = () => {
+    const stateByItem = new Map();
+    for (const state of itemStates) {
+      stateByItem.set(state.item, state);
+    }
+    return stateByItem;
+  };
+
+  const hydrateItems = () => {
+    const stateByItem = latestStateByItem();
+    return items.map(item => ({ ...item, state: stateByItem.get(item.id)?.state }));
+  };
+
   return {
     async source(input) {
       if (input.action === 'list') return { sources };
-      const source = createSourceRecord(input.source ?? {});
-      sources.push(source);
-      return { sources, updated: source };
+      const draft = createSourceRecord(input.source ?? {});
+      const existingIndex = sources.findIndex(source => source.endpoint === draft.endpoint);
+      if (existingIndex >= 0) {
+        sources[existingIndex] = { ...sources[existingIndex], ...draft, id: sources[existingIndex].id };
+        return { sources, updated: sources[existingIndex] };
+      }
+      sources.push(draft);
+      return { sources, updated: draft };
     },
     async item(input) {
-      if (input.action === 'list') return { items };
+      if (input.action === 'list') return { items: hydrateItems() };
       if (input.action === 'read') {
-        const item = items.find(candidate => candidate.id === input.itemId);
-        return { items, item };
+        const hydratedItems = hydrateItems();
+        const item = hydratedItems.find(candidate => candidate.id === input.itemId);
+        return { items: hydratedItems, item };
       }
       if (input.action === 'set_state') {
+        const existingItem = items.find(candidate => candidate.id === input.itemId);
+        if (!existingItem) throw new Error(`Unknown item: ${input.itemId}`);
         const state = createItemStateRecord({ item: input.itemId, state: input.state });
         itemStates.push(state);
-        return { items, item: items.find(candidate => candidate.id === input.itemId), state };
+        const hydratedItems = hydrateItems();
+        return { items: hydratedItems, item: hydratedItems.find(candidate => candidate.id === input.itemId), state };
       }
       const next = createItemRecord(input.item ?? {});
       const duplicate = items.find(candidate => candidate.fingerprint === next.fingerprint);
-      if (duplicate) return { items, item: duplicate };
+      if (duplicate) {
+        const hydratedItems = hydrateItems();
+        return { items: hydratedItems, item: hydratedItems.find(candidate => candidate.id === duplicate.id) };
+      }
       items.push(next);
-      return { items, item: next };
+      const hydratedItems = hydrateItems();
+      return { items: hydratedItems, item: hydratedItems.find(candidate => candidate.id === next.id) };
     },
     async query(input) {
-      return { items: searchItems(items.map(item => ({ ...item, state: itemStates.find(state => state.item === item.id)?.state })), '', input) };
+      return { items: searchItems(hydrateItems(), '', input) };
     },
     async search(input) {
-      return { items: searchItems(items, input.query, input) };
+      return { items: searchItems(hydrateItems(), input.query, input) };
     },
     async attention() {
-      return { attention: summarizeAttention(items) };
+      return { attention: summarizeAttention(hydrateItems()) };
     }
   };
 }

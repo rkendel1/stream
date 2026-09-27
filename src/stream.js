@@ -30,6 +30,12 @@ export function createSourceRecord(input, now = new Date().toISOString()) {
   const kind = ensureValue(input.kind, 'kind');
   if (!SOURCE_KINDS.includes(kind)) throw new Error(`Unsupported source kind: ${kind}`);
   const endpoint = ensureValue(input.endpoint, 'endpoint');
+  const status = input.status ?? 'active';
+  if (!SOURCE_STATUSES.includes(status)) throw new Error(`Unsupported source status: ${status}`);
+  const last_error_category = input.last_error_category ?? '';
+  if (last_error_category && !FAILURE_CATEGORIES.includes(last_error_category)) {
+    throw new Error(`Unsupported failure category: ${last_error_category}`);
+  }
   return {
     id: input.id ?? `source_${randomUUID()}`,
     kind,
@@ -38,10 +44,10 @@ export function createSourceRecord(input, now = new Date().toISOString()) {
     capabilities: stableStringify(input.capabilities ?? []),
     refresh_policy: input.refresh_policy ?? 'manual',
     authentication_reference: input.authentication_reference ?? '',
-    status: input.status ?? 'active',
+    status,
     last_success_at: input.last_success_at ?? '',
     last_failure_at: input.last_failure_at ?? '',
-    last_error_category: input.last_error_category ?? '',
+    last_error_category,
     provenance: input.provenance ?? '',
     created_at: input.created_at ?? now,
     updated_at: input.updated_at ?? now
@@ -53,6 +59,7 @@ export function createItemRecord(input, now = new Date().toISOString()) {
   const content_text = (input.content_text ?? '').trim();
   const canonical_url = (input.canonical_url ?? '').trim();
   const source_kind = ensureValue(input.source_kind, 'source_kind');
+  if (!SOURCE_KINDS.includes(source_kind)) throw new Error(`Unsupported source kind: ${source_kind}`);
   const fingerprint = input.fingerprint ?? createFingerprint({
     canonical_url,
     title,
@@ -108,9 +115,9 @@ export function createFetchAttemptRecord(input, now = new Date().toISOString()) 
     failure_category,
     started_at: input.started_at ?? now,
     finished_at: input.finished_at ?? '',
-    item_count: String(input.item_count ?? '0'),
-    duplicate_count: String(input.duplicate_count ?? '0'),
-    retained_count: String(input.retained_count ?? '0'),
+    item_count: Number(input.item_count ?? 0),
+    duplicate_count: Number(input.duplicate_count ?? 0),
+    retained_count: Number(input.retained_count ?? 0),
     error_message: input.error_message ?? ''
   };
 }
@@ -134,7 +141,7 @@ export function searchItems(items, query = '', filters = {}) {
   return items.filter(item => {
     if (filters.source && item.source !== filters.source) return false;
     if (filters.source_kind && item.source_kind !== filters.source_kind) return false;
-    if (filters.after && item.published_at && item.published_at < filters.after) return false;
+    if (filters.after && item.published_at && item.published_at <= filters.after) return false;
     if (filters.state && item.state !== filters.state) return false;
     const haystack = [item.title, item.content_text, item.author_name, item.canonical_url]
       .filter(Boolean)

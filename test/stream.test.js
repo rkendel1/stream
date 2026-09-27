@@ -55,6 +55,35 @@ test('memory service deduplicates ingested items by fingerprint', async () => {
   assert.equal(summarizeAttention(second.items).total, 1);
 });
 
+test('invalid source kinds are rejected', async () => {
+  assert.throws(() => createSourceRecord({ kind: 'invalid', endpoint: 'https://example.com/feed.xml' }), /Unsupported source kind/);
+
+  const service = createMemoryStreamService();
+  await assert.rejects(
+    () => service.item({ action: 'ingest', item: { source: 'source_a', source_kind: 'invalid', title: 'Hello', content_text: 'World' } }),
+    /Unsupported source kind/
+  );
+});
+
+test('memory service query reflects the latest item state', async () => {
+  const service = createMemoryStreamService();
+  const ingested = await service.item({ action: 'ingest', item: { source: 'source_a', source_kind: 'rss', title: 'Hello', content_text: 'World' } });
+  const itemId = ingested.item.id;
+
+  await service.item({ action: 'set_state', itemId, state: 'seen' });
+  await service.item({ action: 'set_state', itemId, state: 'saved' });
+
+  const query = await service.query({ state: 'saved' });
+  const search = await service.search({ query: 'hello', state: 'saved' });
+  const read = await service.item({ action: 'read', itemId });
+
+  assert.equal(query.items.length, 1);
+  assert.equal(query.items[0].state, 'saved');
+  assert.equal(search.items.length, 1);
+  assert.equal(search.items[0].state, 'saved');
+  assert.equal(read.item.state, 'saved');
+});
+
 test('CLI surfaces doctor and source add flows', async () => {
   const service = createMemoryStreamService();
   const added = await runCli(['source', 'add', 'https://example.com/feed.xml', 'rss'], service);

@@ -136,9 +136,9 @@ app Stream {
     failure_category: text
     started_at: datetime
     finished_at: datetime
-    item_count: text
-    duplicate_count: text
-    retained_count: text
+    item_count: integer
+    duplicate_count: integer
+    retained_count: integer
     error_message: text
     index source using hash(source)
     index status using hash(status)
