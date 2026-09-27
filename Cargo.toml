@@ -4,10 +4,15 @@ members = [
   "crates/stream-core",
   "crates/stream-ingest",
   "crates/stream-rss",
+  "crates/stream-web",
+  "crates/stream-semantic",
+
   "crates/stream-query",
   "crates/stream-rules",
   "crates/stream-appport",
   "crates/stream-cli",
+  "crates/stream-desktop",
+  "crates/stream-testkit",
 ]
 resolver = "2"
 
@@ -33,3 +38,4 @@ uuid = { version = "1.18", features = ["v4", "serde"] }
 rss = "2.0"
 atom_syndication = "0.12"
 jsonfeed = "0.2"
+scraper = "0.20"

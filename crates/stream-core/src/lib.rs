@@ -11,42 +11,61 @@ use stream_model::{
     AttentionEvent, AttentionEventId, AttentionStatus, AttentionSummary, FetchAttempt, FetchResult,
     FetchStatus, Fingerprint, Item, ItemId, ItemRelation, ItemState, ItemStateRecord, NormalizedItem,
     Provenance, ProvenanceId, RelationKind, Rule, RuleAction, RuleExecution, RuleExecutionId,
-    RuleExecutionResult, RuleId, Source, SourceId, SourceKind, SourceStatus,
+    ProcessingStage, RuleExecutionResult, RuleId, Source, SourceId, SourceKind, SourceStatus,
 };
 use stream_rules::rule_matches;
+use stream_semantic::{HeuristicInterpreter, Interpreter};
 
+mod intelligence;
+mod records;
+
+pub use intelligence::*;
+
+/// The FeltDB bridge: one long-lived Node process speaking JSON lines.
+///
+/// FeltDB remains the only authority. The bridge holds no state of its own
+/// beyond open FeltDB handles, and FeltDB file-runtime handles observe writes
+/// made by other processes (the CLI and the desktop app can run side by side).
 const FELTDB_BRIDGE: &str = r#"
 import { createFeltDB } from '@feltdb/core';
+import { createInterface } from 'node:readline';
 
-let inputText = '';
-for await (const chunk of process.stdin) {
-  inputText += chunk;
-}
-const input = JSON.parse(inputText);
-const db = createFeltDB({ namespace: input.namespace, path: input.path });
-const collection = db.collection(input.collection);
-let result;
-
-switch (input.op) {
-  case 'insert':
-    await collection.insert(input.record, input.id, input.requireAbsent ? { requireAbsent: true } : undefined);
-    result = input.record;
-    break;
-  case 'get':
-    result = await collection.get(input.id);
-    break;
-  case 'find':
-    result = await collection.find(input.query ?? {});
-    break;
-  case 'update':
-    await collection.update(input.id, input.record);
-    result = input.record;
-    break;
-  default:
-    throw new Error(`unsupported op: ${input.op}`);
+const handles = new Map();
+function database(namespace, path) {
+  const key = `${namespace}\u0000${path}`;
+  if (!handles.has(key)) handles.set(key, createFeltDB({ namespace, path }));
+  return handles.get(key);
 }
 
-process.stdout.write(JSON.stringify({ ok: true, result }));
+async function execute(input) {
+  const collection = database(input.namespace, input.path).collection(input.collection);
+  switch (input.op) {
+    case 'insert':
+      await collection.insert(input.record, input.id, input.requireAbsent ? { requireAbsent: true } : undefined);
+      return input.record;
+    case 'get':
+      return (await collection.get(input.id)) ?? null;
+    case 'find':
+      return await collection.find(input.query ?? {});
+    case 'update':
+      await collection.update(input.id, input.record);
+      return input.record;
+    default:
+      throw new Error(`unsupported op: ${input.op}`);
+  }
+}
+
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+for await (const line of lines) {
+  if (!line.trim()) continue;
+  let response;
+  try {
+    response = { ok: true, result: await execute(JSON.parse(line)) };
+  } catch (error) {
+    response = { ok: false, error: String(error?.stack ?? error) };
+  }
+  process.stdout.write(JSON.stringify(response) + '\n');
+}
 "#;
 
 #[derive(Debug, Clone)]
@@ -54,6 +73,8 @@ pub struct FeltDbConfig {
     pub namespace: String,
     pub path: PathBuf,
     pub node_binary: String,
+    /// Directory the bridge runs in; `@feltdb/core` is resolved from here.
+    pub working_dir: PathBuf,
 }
 
 impl FeltDbConfig {
@@ -62,23 +83,106 @@ impl FeltDbConfig {
         let namespace = env::var("VITE_FELTDB_NAMESPACE").unwrap_or_else(|_| "stream".into());
         let path = env::var("STREAM_FELTDB_PATH")
             .map(PathBuf::from)
+            .map(|path| if path.is_relative() { repo_root.join(path) } else { path })
             .unwrap_or_else(|_| repo_root.join(".feltdb-data").join("stream"));
         let node_binary = env::var("STREAM_NODE_BINARY").unwrap_or_else(|_| "node".into());
-        Self { namespace, path, node_binary }
+        Self {
+            namespace,
+            path,
+            node_binary,
+            working_dir: repo_root.to_path_buf(),
+        }
+    }
+
+    /// A config rooted at `working_dir` with an explicit namespace and data path.
+    pub fn at(working_dir: impl Into<PathBuf>, namespace: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            path: path.into(),
+            node_binary: env::var("STREAM_NODE_BINARY").unwrap_or_else(|_| "node".into()),
+            working_dir: working_dir.into(),
+        }
     }
 }
 
-#[derive(Debug, Clone)]
+struct BridgeSession {
+    _child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::io::BufReader<tokio::process::ChildStdout>,
+    stderr: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+#[derive(Clone)]
 pub struct FeltDbStore {
     config: FeltDbConfig,
+    session: std::sync::Arc<tokio::sync::Mutex<Option<BridgeSession>>>,
+}
+
+impl std::fmt::Debug for FeltDbStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeltDbStore").field("config", &self.config).finish()
+    }
 }
 
 impl FeltDbStore {
     pub fn new(config: FeltDbConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            session: Default::default(),
+        }
+    }
+
+    pub fn config(&self) -> &FeltDbConfig {
+        &self.config
+    }
+
+    fn spawn_session(&self) -> Result<BridgeSession> {
+        use tokio::io::AsyncBufReadExt;
+        let mut command = Command::new(&self.config.node_binary);
+        command
+            .arg("--input-type=module")
+            .arg("-e")
+            .arg(FELTDB_BRIDGE)
+            .current_dir(&self.config.working_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        // Stream is local-first: FeltDB must not phone home unless asked to.
+        if env::var_os("FELTDB_TELEMETRY").is_none() {
+            command.env("FELTDB_TELEMETRY", "0");
+        }
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn {} for FeltDB bridge", self.config.node_binary))?;
+        let stdin = child.stdin.take().context("missing bridge stdin")?;
+        let stdout = tokio::io::BufReader::new(child.stdout.take().context("missing bridge stdout")?);
+        let stderr_pipe = child.stderr.take().context("missing bridge stderr")?;
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = stderr.clone();
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stderr_pipe).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut buffer = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                buffer.push_str(&line);
+                buffer.push('\n');
+                if buffer.len() > 8192 {
+                    let cut = buffer.len() - 4096;
+                    let cut = (cut..buffer.len()).find(|index| buffer.is_char_boundary(*index)).unwrap_or(0);
+                    buffer.drain(..cut);
+                }
+            }
+        });
+        Ok(BridgeSession {
+            _child: child,
+            stdin,
+            stdout,
+            stderr,
+        })
     }
 
     async fn invoke(&self, collection: &str, op: &str, payload: Value) -> Result<Value> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         let mut input = serde_json::Map::new();
         input.insert("namespace".into(), Value::String(self.config.namespace.clone()));
         input.insert("path".into(), Value::String(self.config.path.display().to_string()));
@@ -87,28 +191,40 @@ impl FeltDbStore {
         if let Value::Object(map) = payload {
             input.extend(map);
         }
+        let mut request = serde_json::to_vec(&Value::Object(input))?;
+        request.push(b'\n');
 
-        let mut child = Command::new(&self.config.node_binary)
-            .arg("--input-type=module")
-            .arg("-e")
-            .arg(FELTDB_BRIDGE)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .with_context(|| format!("failed to spawn {} for FeltDB bridge", self.config.node_binary))?;
-
-        use tokio::io::AsyncWriteExt;
-        let request = serde_json::to_vec(&Value::Object(input))?;
-        child.stdin.take().context("missing stdin")?.write_all(&request).await?;
-
-        let output = child.wait_with_output().await?;
-        if !output.status.success() {
-            return Err(anyhow!(String::from_utf8_lossy(&output.stderr).to_string()));
+        let mut guard = self.session.lock().await;
+        if guard.is_none() {
+            *guard = Some(self.spawn_session()?);
         }
+        let session = guard.as_mut().expect("bridge session present");
+        let mut line = String::new();
+        let io = async {
+            session.stdin.write_all(&request).await?;
+            session.stdin.flush().await?;
+            session.stdout.read_line(&mut line).await
+        }
+        .await;
+        match io {
+            Ok(read) if read > 0 => {}
+            outcome => {
+                let stderr = session.stderr.lock().map(|buffer| buffer.clone()).unwrap_or_default();
+                *guard = None;
+                let reason = match outcome {
+                    Err(error) => error.to_string(),
+                    _ => "bridge exited".into(),
+                };
+                return Err(anyhow!("FeltDB bridge failed ({reason}): {}", stderr.trim()));
+            }
+        }
+        drop(guard);
 
-        let response: BridgeResponse = serde_json::from_slice(&output.stdout)
-            .context("failed to parse FeltDB bridge response")?;
+        let response: BridgeResponse =
+            serde_json::from_str(&line).context("failed to parse FeltDB bridge response")?;
+        if !response.ok {
+            return Err(anyhow!("FeltDB {op} on {collection} failed: {}", response.error.unwrap_or_default()));
+        }
         Ok(response.result)
     }
 
@@ -164,6 +280,7 @@ pub struct StreamRuntime {
     store: FeltDbStore,
     fetcher: HttpFetcher,
     adapters: AdapterRegistry,
+    interpreter: std::sync::Arc<dyn Interpreter>,
 }
 
 impl StreamRuntime {
@@ -172,7 +289,15 @@ impl StreamRuntime {
             store,
             fetcher: HttpFetcher::default(),
             adapters,
+            interpreter: std::sync::Arc::new(HeuristicInterpreter),
         }
+    }
+
+    /// Replace the semantic provider. Interpretation stays advisory whichever
+    /// provider is used: every proposal passes the same evidence gate.
+    pub fn with_interpreter(mut self, interpreter: std::sync::Arc<dyn Interpreter>) -> Self {
+        self.interpreter = interpreter;
+        self
     }
 
     pub fn store(&self) -> &FeltDbStore {
@@ -552,22 +677,45 @@ impl StreamRuntime {
 
     async fn persist_fetch_result(
         &self,
+        source: Source,
+        attempt: FetchAttempt,
+        normalized_items: Vec<NormalizedItem>,
+    ) -> Result<FetchResult> {
+        let (_, attempt, outcomes) = self.persist_observation(source, attempt, normalized_items).await?;
+        let duplicate_count = outcomes.iter().filter(|outcome| !outcome.is_new).count() as u64;
+        Ok(FetchResult {
+            attempt,
+            new_item_ids: outcomes
+                .into_iter()
+                .filter(|outcome| outcome.is_new)
+                .map(|outcome| outcome.item.id)
+                .collect(),
+            duplicate_count,
+        })
+    }
+
+    /// Persist one observation of a source: every normalized item goes through
+    /// the existing fingerprint/identity dedup, and each outcome says whether
+    /// the item is new or an additional observation of a known item.
+    async fn persist_observation(
+        &self,
         mut source: Source,
         mut attempt: FetchAttempt,
         normalized_items: Vec<NormalizedItem>,
-    ) -> Result<FetchResult> {
-        let mut new_item_ids = Vec::new();
+    ) -> Result<(Source, FetchAttempt, Vec<PersistOutcome>)> {
+        let mut outcomes = Vec::new();
         let mut duplicates = 0_u64;
 
         for normalized_item in normalized_items.iter() {
             let persisted = self.persist_normalized_item(&source, normalized_item).await?;
             if persisted.is_new {
-                new_item_ids.push(persisted.item.id.clone());
                 self.apply_rules(&persisted.item).await?;
             } else {
                 duplicates += 1;
             }
+            outcomes.push(persisted);
         }
+        let retained = outcomes.iter().filter(|outcome| outcome.is_new).count() as u64;
 
         source.status = SourceStatus::Active;
         source.last_success_at = Some(Utc::now());
@@ -585,16 +733,12 @@ impl StreamRuntime {
         attempt.completed_at = Some(Utc::now());
         attempt.item_count = normalized_items.len() as u64;
         attempt.duplicate_count = duplicates;
-        attempt.retained_count = new_item_ids.len() as u64;
+        attempt.retained_count = retained;
         self.store
             .update("FetchAttempt", attempt.id.as_str(), fetch_attempt_record(&attempt))
             .await?;
 
-        Ok(FetchResult {
-            attempt,
-            new_item_ids,
-            duplicate_count: duplicates,
-        })
+        Ok((source, attempt, outcomes))
     }
 
     async fn record_observation(
@@ -744,7 +888,11 @@ impl StreamRuntime {
 
 #[derive(Debug, Deserialize)]
 struct BridgeResponse {
+    ok: bool,
+    #[serde(default)]
     result: Value,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -757,8 +905,17 @@ fn source_record(source: &Source) -> Value {
     json!({
         "__id": source.id.as_str(),
         "kind": source.kind.to_string(),
+        "adapter_kind": source.adapter_kind.to_string(),
         "endpoint": source.endpoint.as_str(),
         "identity": source.identity,
+        "canonical_url": source.canonical_url.as_str(),
+        "original_url": source.original_url.as_str(),
+        "title": source.title.clone().unwrap_or_default(),
+        "stage": source.stage.as_str(),
+        "stage_detail": source.stage_detail.clone().unwrap_or_default(),
+        "provenance": source.provenance,
+        "discovered_at": source.discovered_at.to_rfc3339(),
+        "last_observed_at": source.last_observed_at.map(|value| value.to_rfc3339()).unwrap_or_default(),
         "configuration": source.configuration.to_string(),
         "status": source.status.to_string(),
         "refresh_minutes": source.refresh_minutes,
@@ -776,10 +933,34 @@ fn source_record(source: &Source) -> Value {
 }
 
 fn source_from_value(value: Value) -> Result<Source> {
+    let kind = source_kind(&value_string(&value, "kind")?)?;
+    let endpoint = url::Url::parse(&value_string(&value, "endpoint")?)?;
+    let created_at = value_datetime(&value, "created_at")?;
+    // Sources written before the generic source model default sensibly.
+    let url_or = |field: &str, fallback: &url::Url| -> Result<url::Url> {
+        Ok(match value_string_opt(&value, field)? {
+            Some(raw) => url::Url::parse(&raw)?,
+            None => fallback.clone(),
+        })
+    };
     Ok(Source {
         id: SourceId::new(value_string(&value, "__id")?),
-        kind: source_kind(&value_string(&value, "kind")?)?,
-        endpoint: url::Url::parse(&value_string(&value, "endpoint")?)?,
+        kind,
+        adapter_kind: value_string_opt(&value, "adapter_kind")?
+            .map(|value| source_kind(&value))
+            .transpose()?
+            .unwrap_or(kind),
+        canonical_url: url_or("canonical_url", &endpoint)?,
+        original_url: url_or("original_url", &endpoint)?,
+        title: value_string_opt(&value, "title")?,
+        stage: value_string_opt(&value, "stage")?
+            .and_then(|value| ProcessingStage::parse(&value))
+            .unwrap_or(ProcessingStage::Queued),
+        stage_detail: value_string_opt(&value, "stage_detail")?,
+        provenance: value_string_opt(&value, "provenance")?.unwrap_or_else(|| "configured".into()),
+        discovered_at: value_datetime_opt(&value, "discovered_at")?.unwrap_or(created_at),
+        last_observed_at: value_datetime_opt(&value, "last_observed_at")?,
+        endpoint,
         identity: value_string(&value, "identity")?,
         configuration: serde_json::from_str(&value_string(&value, "configuration")?).unwrap_or_else(|_| json!({})),
         status: source_status(&value_string(&value, "status")?)?,
@@ -792,7 +973,7 @@ fn source_from_value(value: Value) -> Result<Source> {
         consecutive_failures: value_u64(&value, "consecutive_failures")? as u32,
         fetched_items_count: value_u64(&value, "fetched_items_count")?,
         duplicate_items_count: value_u64(&value, "duplicate_items_count")?,
-        created_at: value_datetime(&value, "created_at")?,
+        created_at,
         updated_at: value_datetime(&value, "updated_at")?,
     })
 }
@@ -1046,19 +1227,7 @@ fn value_datetime_opt(value: &Value, field: &str) -> Result<Option<DateTime<Utc>
 }
 
 fn source_kind(value: &str) -> Result<SourceKind> {
-    match value {
-        "rss" => Ok(SourceKind::Rss),
-        "atom" => Ok(SourceKind::Atom),
-        "json_feed" => Ok(SourceKind::JsonFeed),
-        "web" => Ok(SourceKind::Web),
-        "github" => Ok(SourceKind::Github),
-        "youtube" => Ok(SourceKind::Youtube),
-        "email" => Ok(SourceKind::Email),
-        "webhook" => Ok(SourceKind::Webhook),
-        "api" => Ok(SourceKind::Api),
-        "appport" => Ok(SourceKind::Appport),
-        other => Err(anyhow!("unsupported source kind: {other}")),
-    }
+    SourceKind::parse(value).ok_or_else(|| anyhow!("unsupported source kind: {value}"))
 }
 
 fn source_status(value: &str) -> Result<SourceStatus> {
@@ -1200,11 +1369,7 @@ mod tests {
 
     #[test]
     fn runtime_can_be_constructed() {
-        let config = FeltDbConfig {
-            namespace: "stream-test".into(),
-            path: PathBuf::from("/tmp/stream-test"),
-            node_binary: "node".into(),
-        };
+        let config = FeltDbConfig::at(".", "stream-test", PathBuf::from("/tmp/stream-test"));
         let runtime = StreamRuntime::new(FeltDbStore::new(config), AdapterRegistry::new(vec![]));
         assert_eq!(runtime.store().config.namespace, "stream-test");
     }

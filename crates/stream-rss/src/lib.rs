@@ -4,8 +4,14 @@ use chrono::{DateTime, Utc};
 use jsonfeed::{Content as JsonContent, Feed as JsonFeed};
 use rss::Channel;
 use stream_ingest::SourceAdapter;
-use stream_model::{NormalizedItem, Source, SourceKind};
+use stream_model::{canonicalize_url, NormalizedItem, Source, SourceKind};
 use url::Url;
+
+/// Entry links are canonicalized so the same document observed through a
+/// feed and as a web page (or with tracking parameters) is one item.
+fn canonical_link(link: &str) -> Option<Url> {
+    canonicalize_url(link).ok()
+}
 
 pub struct RssAdapter;
 pub struct AtomAdapter;
@@ -22,7 +28,8 @@ impl SourceAdapter for RssAdapter {
             .items()
             .iter()
             .map(|entry| {
-                let canonical_url = entry.link().and_then(|link| Url::parse(link).ok());
+                let raw_url = entry.link().and_then(|link| Url::parse(link).ok());
+                let canonical_url = entry.link().and_then(canonical_link);
                 let published_at = entry
                     .pub_date()
                     .and_then(|date| DateTime::parse_from_rfc2822(date).ok())
@@ -38,7 +45,7 @@ impl SourceAdapter for RssAdapter {
                     .map(|guid| guid.value().to_owned())
                     .or_else(|| canonical_url.as_ref().map(|url| url.as_str().to_owned()))
                     .unwrap_or_else(|| title.clone());
-                let source_url = canonical_url.clone().unwrap_or_else(|| Url::parse("https://example.invalid/").unwrap());
+                let source_url = raw_url.unwrap_or_else(|| Url::parse("https://example.invalid/").unwrap());
                 Ok(NormalizedItem {
                     source_kind: SourceKind::Rss,
                     canonical_identity: canonical_url
@@ -71,16 +78,14 @@ impl SourceAdapter for AtomAdapter {
         feed.entries()
             .iter()
             .map(|entry| {
-                let canonical_url = entry
-                    .links()
-                    .first()
-                    .and_then(|link| Url::parse(link.href()).ok());
+                let raw_url = entry.links().first().and_then(|link| Url::parse(link.href()).ok());
+                let canonical_url = entry.links().first().and_then(|link| canonical_link(link.href()));
                 let published_at = entry
                     .published()
                     .cloned()
                     .or_else(|| Some(entry.updated().to_owned()))
                     .map(|value| value.with_timezone(&Utc));
-                let source_url = canonical_url.clone().unwrap_or_else(|| Url::parse(entry.id()).unwrap_or_else(|_| Url::parse("https://example.invalid/").unwrap()));
+                let source_url = raw_url.unwrap_or_else(|| Url::parse(entry.id()).unwrap_or_else(|_| Url::parse("https://example.invalid/").unwrap()));
                 Ok(NormalizedItem {
                     source_kind: SourceKind::Atom,
                     canonical_identity: canonical_url
@@ -117,12 +122,11 @@ impl SourceAdapter for JsonFeedAdapter {
         feed.items
             .into_iter()
             .map(|entry| {
-                let canonical_url = entry
-                    .url
-                    .as_ref()
-                    .or(entry.external_url.as_ref())
-                    .and_then(|url| Url::parse(url).ok());
-                let source_url = canonical_url.clone().unwrap_or_else(|| Url::parse("https://example.invalid/").unwrap());
+                let link = entry.url.as_ref().or(entry.external_url.as_ref());
+                let canonical_url = link.and_then(|url| canonical_link(url));
+                let source_url = link
+                    .and_then(|url| Url::parse(url).ok())
+                    .unwrap_or_else(|| Url::parse("https://example.invalid/").unwrap());
                 let published_at = entry.date_published.as_ref().and_then(parse_rfc3339_datetime);
                 let title = entry.title.unwrap_or_else(|| "untitled".into());
                 let (content_text, content_html) = match entry.content {

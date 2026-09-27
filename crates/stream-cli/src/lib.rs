@@ -1,17 +1,19 @@
 use anyhow::{anyhow, Result};
 use chrono::{Duration, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use stream_appport::AppPortManifest;
-use stream_core::{FeltDbConfig, FeltDbStore, StreamRuntime};
-use stream_ingest::AdapterRegistry;
+use stream_appport::{AppPortManifest, StreamAppPort};
+use stream_core::StreamRuntime;
 use stream_model::{AttentionEventId, ItemId, SourceId, SourceKind};
 use stream_query::StreamQueryService;
-use stream_rss::default_adapters;
 use std::path::Path;
+
+mod intelligence;
+
+pub use intelligence::{ContextCommand, ContextKindArg};
 
 #[derive(Debug, Parser)]
 #[command(name = "stream")]
-#[command(about = "Stream — a local-first information runtime")]
+#[command(about = "Stream — give it URLs; it builds an evidence-backed understanding of what is changing")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -19,6 +21,44 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Add a URL: Stream determines what it is, observes it, and builds signals.
+    Add {
+        url: String,
+        /// Only establish the durable source; do not fetch yet.
+        #[arg(long)]
+        no_observe: bool,
+    },
+    /// Today: signals ranked by information density.
+    Signals {
+        /// Include resolved and dismissed signals.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One signal with its evidence, connections, and why it is ranked where it is.
+    Signal {
+        id: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, conflicts_with = "dismiss")]
+        resolve: bool,
+        #[arg(long)]
+        dismiss: bool,
+    },
+    /// What you care about.
+    Context {
+        #[command(subcommand)]
+        command: ContextCommand,
+    },
+    /// Connections of a signal, item, or context — or the whole graph.
+    Connections {
+        id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sources Stream observes, with their processing stage.
+    Sources,
     Source {
         #[command(subcommand)]
         command: SourceCommand,
@@ -55,6 +95,8 @@ pub enum SourceCommand {
     List,
     Get { id: String },
     Refresh { id: String },
+    /// Observe a source again through the full understanding pipeline.
+    Observe { id: String },
     Pause { id: String },
     Resume { id: String },
 }
@@ -71,6 +113,8 @@ pub enum SourceKindArg {
     Webhook,
     Api,
     Appport,
+    Documentation,
+    Research,
 }
 
 impl From<SourceKindArg> for SourceKind {
@@ -86,6 +130,8 @@ impl From<SourceKindArg> for SourceKind {
             SourceKindArg::Webhook => SourceKind::Webhook,
             SourceKindArg::Api => SourceKind::Api,
             SourceKindArg::Appport => SourceKind::Appport,
+            SourceKindArg::Documentation => SourceKind::Documentation,
+            SourceKindArg::Research => SourceKind::Research,
         }
     }
 }
@@ -120,32 +166,57 @@ pub enum AttentionCommand {
 #[derive(Debug, Subcommand)]
 pub enum AppPortCommand {
     Manifest,
+    /// Invoke a capability exactly as any AppPort client would.
+    Invoke {
+        capability: String,
+        /// JSON input (defaults to {}).
+        input: Option<String>,
+    },
 }
 
 pub async fn run(cli: Cli, repo_root: impl AsRef<Path>) -> Result<String> {
-    let runtime = build_runtime(repo_root);
+    let port = StreamAppPort::new(stream_appport::runtime_for_root(repo_root)).with_provenance("cli");
+    run_with(cli, &port).await
+}
+
+/// Run a command against an existing AppPort surface. The CLI holds no
+/// logic of its own: everything goes through the same runtime the desktop
+/// app and AppPort clients use.
+pub async fn run_with(cli: Cli, port: &StreamAppPort) -> Result<String> {
+    let runtime = port.runtime();
     match cli.command {
-        Command::Source { command } => run_source(command, &runtime).await,
-        Command::Item { command } => run_item(command, &runtime).await,
-        Command::Query { command } => run_query(command, &runtime).await,
+        Command::Add { url, no_observe } => intelligence::add(port, &url, no_observe).await,
+        Command::Signals { all, json } => intelligence::signals(runtime, all, json).await,
+        Command::Signal { id, json, resolve, dismiss } => intelligence::signal(runtime, &id, json, resolve, dismiss).await,
+        Command::Context { command } => intelligence::context(runtime, command).await,
+        Command::Connections { id, json } => intelligence::connections(runtime, id.as_deref(), json).await,
+        Command::Sources => intelligence::sources(runtime).await,
+        Command::Source { command } => run_source(command, runtime).await,
+        Command::Item { command } => run_item(command, runtime).await,
+        Command::Query { command } => run_query(command, runtime).await,
         Command::Search { query } => {
-            let service = StreamQueryService::new(&runtime);
+            let service = StreamQueryService::new(runtime);
             let items = service.search(query, None, None).await?;
             Ok(format_item_list(items))
         }
-        Command::Attention { command } => run_attention(command, &runtime).await,
+        Command::Attention { command } => run_attention(command, runtime).await,
         Command::Appport { command } => match command {
             AppPortCommand::Manifest => Ok(serde_json::to_string_pretty(&AppPortManifest::stream())?),
+            AppPortCommand::Invoke { capability, input } => {
+                let input = match input {
+                    Some(raw) => serde_json::from_str(&raw).map_err(|error| anyhow!("input is not JSON: {error}"))?,
+                    None => serde_json::json!({}),
+                };
+                let result = port.invoke(&capability, input).await;
+                Ok(serde_json::to_string_pretty(&stream_appport::envelope(result))?)
+            }
         },
-        Command::Doctor => run_doctor(&runtime).await,
+        Command::Doctor => run_doctor(runtime).await,
     }
 }
 
 pub fn build_runtime(repo_root: impl AsRef<Path>) -> StreamRuntime {
-    let config = FeltDbConfig::from_env(repo_root);
-    let store = FeltDbStore::new(config);
-    let adapters = AdapterRegistry::new(default_adapters());
-    StreamRuntime::new(store, adapters)
+    stream_appport::runtime_for_root(repo_root)
 }
 
 async fn run_source(command: SourceCommand, runtime: &StreamRuntime) -> Result<String> {
@@ -177,6 +248,10 @@ async fn run_source(command: SourceCommand, runtime: &StreamRuntime) -> Result<S
                 result.new_item_ids.len(),
                 result.duplicate_count
             ))
+        }
+        SourceCommand::Observe { id } => {
+            let report = runtime.observe_source(&SourceId::new(id), Some(&intelligence::print_stage)).await?;
+            Ok(intelligence::format_report(&report))
         }
         SourceCommand::Pause { id } => {
             let source = runtime.pause_source(&SourceId::new(id)).await?;

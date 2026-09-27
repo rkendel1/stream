@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stream</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">Stream</div>
+    <div class="bar-actions">
+      <button id="open-context" class="ghost" type="button">+ Context</button>
+      <button id="open-add" class="primary" type="button">+ Add URL</button>
+    </div>
+  </header>
+
+  <div class="shell">
+    <form id="add-form" class="composer" hidden autocomplete="off">
+      <label for="add-url">What do you want to know about?</label>
+      <div class="composer-row">
+        <input id="add-url" name="url" type="text" inputmode="url" placeholder="Paste a URL — an article, a repo, a paper, a feed…" required>
+        <button class="primary" type="submit">Understand</button>
+        <button class="ghost" type="button" data-close>Cancel</button>
+      </div>
+      <p class="hint">Stream works out what it is, what changed, and how it connects to what you care about.</p>
+    </form>
+
+    <form id="context-form" class="composer" hidden autocomplete="off">
+      <label for="context-name">What do you care about?</label>
+      <div class="composer-row">
+        <input id="context-name" name="name" type="text" placeholder="Portable compute, AppPort, customer pain…" required>
+        <select name="kind" aria-label="Kind">
+          <option value="interest">Interest</option>
+          <option value="project">Project</option>
+          <option value="concern">Concern</option>
+        </select>
+      </div>
+      <div class="composer-row">
+        <input name="description" type="text" placeholder="Describe it in your words (optional) — Stream matches against this">
+      </div>
+      <div class="composer-row related-row" hidden>
+        <span class="muted">Related to</span>
+        <div id="context-related" class="chips"></div>
+      </div>
+      <div class="composer-row end">
+        <button class="ghost" type="button" data-close>Cancel</button>
+        <button class="primary" type="submit">Add context</button>
+      </div>
+    </form>
+
+    <section id="jobs" aria-live="polite"></section>
+
+    <main>
+      <div class="today-head">
+        <h1>Today</h1>
+        <nav class="tabs" role="tablist">
+          <button role="tab" data-tab="signals" aria-selected="true">Signals</button>
+          <button role="tab" data-tab="sources" aria-selected="false">Sources</button>
+          <button role="tab" data-tab="connections" aria-selected="false">Connections</button>
+        </nav>
+      </div>
+      <section id="view" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <div id="scrim" hidden></div>
+  <aside id="drawer" hidden aria-label="Signal detail" tabindex="-1"></aside>
+  <div id="toast" role="status" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

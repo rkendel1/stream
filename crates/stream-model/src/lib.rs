@@ -7,6 +7,15 @@ use std::fmt::{Display, Formatter};
 use url::Url;
 use uuid::Uuid;
 
+mod canonical;
+mod intelligence;
+
+pub use canonical::{canonicalize_url, classify_url, CanonicalUrlError};
+pub use intelligence::{
+    slug, Change, ChangeKind, ClaimKind, Connection, ConnectionRelation, ConnectionTargetKind, ContextEntry,
+    ContextKind, Evidence, EvidenceLocator, ProcessingStage, Signal, SignalStatus, Subject, Topic,
+};
+
 macro_rules! typed_id {
     ($name:ident, $prefix:literal) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
@@ -52,6 +61,19 @@ typed_id!(RuleExecutionId, "rule_execution");
 typed_id!(ProvenanceId, "provenance");
 typed_id!(ItemRelationId, "relation");
 typed_id!(ItemStateId, "item_state");
+typed_id!(ContextId, "context");
+typed_id!(SignalId, "signal");
+typed_id!(EvidenceId, "evidence");
+typed_id!(ConnectionId, "connection");
+
+impl SourceId {
+    /// A deterministic ID for a canonical identity, so that adding the same
+    /// URL twice — even concurrently — resolves to the same durable source.
+    pub fn for_identity(identity: &str) -> Self {
+        let digest = Sha256::digest(identity.as_bytes());
+        Self(format!("source_{}", &format!("{:x}", digest)[..32]))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -127,6 +149,34 @@ pub enum SourceKind {
     Webhook,
     Api,
     Appport,
+    Documentation,
+    Research,
+}
+
+impl SourceKind {
+    pub const ALL: [SourceKind; 12] = [
+        SourceKind::Rss,
+        SourceKind::Atom,
+        SourceKind::JsonFeed,
+        SourceKind::Web,
+        SourceKind::Github,
+        SourceKind::Youtube,
+        SourceKind::Email,
+        SourceKind::Webhook,
+        SourceKind::Api,
+        SourceKind::Appport,
+        SourceKind::Documentation,
+        SourceKind::Research,
+    ];
+
+    pub fn parse(value: &str) -> Option<SourceKind> {
+        Self::ALL.into_iter().find(|kind| kind.to_string() == value)
+    }
+
+    /// Feed formats are ingestion adapters, never the user-facing source model.
+    pub fn is_feed_format(self) -> bool {
+        matches!(self, SourceKind::Rss | SourceKind::Atom | SourceKind::JsonFeed)
+    }
 }
 
 impl Display for SourceKind {
@@ -142,6 +192,8 @@ impl Display for SourceKind {
             Self::Webhook => "webhook",
             Self::Api => "api",
             Self::Appport => "appport",
+            Self::Documentation => "documentation",
+            Self::Research => "research",
         };
         f.write_str(value)
     }
@@ -332,12 +384,26 @@ impl Display for AttentionStatus {
     }
 }
 
+/// A durable source of information.
+///
+/// `kind` is the user-facing classification (web page, GitHub, research, ...).
+/// `adapter_kind` is the ingestion adapter used to observe `endpoint` — RSS,
+/// Atom, and JSON Feed live here, underneath the generic source model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub id: SourceId,
     pub kind: SourceKind,
+    pub adapter_kind: SourceKind,
     pub endpoint: Url,
     pub identity: String,
+    pub canonical_url: Url,
+    pub original_url: Url,
+    pub title: Option<String>,
+    pub stage: ProcessingStage,
+    pub stage_detail: Option<String>,
+    pub provenance: String,
+    pub discovered_at: DateTime<Utc>,
+    pub last_observed_at: Option<DateTime<Utc>>,
     pub configuration: Value,
     pub status: SourceStatus,
     pub refresh_minutes: u32,
@@ -359,7 +425,16 @@ impl Source {
         Self {
             id: SourceId::generate(),
             kind,
+            adapter_kind: kind,
             identity: endpoint.as_str().to_owned(),
+            canonical_url: endpoint.clone(),
+            original_url: endpoint.clone(),
+            title: None,
+            stage: ProcessingStage::Queued,
+            stage_detail: None,
+            provenance: "configured".into(),
+            discovered_at: now,
+            last_observed_at: None,
             endpoint,
             configuration: json!({}),
             status: SourceStatus::Active,
@@ -375,6 +450,23 @@ impl Source {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// A source established from a URL the user handed to Stream.
+    ///
+    /// The canonical URL is the durable identity; the original URL is kept
+    /// verbatim as provenance and is what Stream fetches first.
+    pub fn from_user_url(original_url: Url, canonical_url: Url, provenance: impl Into<String>) -> Self {
+        let kind = classify_url(&canonical_url);
+        let mut source = Self::new(kind, original_url.clone());
+        source.id = SourceId::for_identity(canonical_url.as_str());
+        source.adapter_kind = if kind.is_feed_format() { kind } else { SourceKind::Web };
+        source.identity = canonical_url.as_str().to_owned();
+        source.canonical_url = canonical_url;
+        source.original_url = original_url;
+        source.status = SourceStatus::Discovered;
+        source.provenance = provenance.into();
+        source
     }
 }
 
