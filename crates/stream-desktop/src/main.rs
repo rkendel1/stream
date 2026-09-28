@@ -78,6 +78,60 @@ mod native {
         Reply(String),
     }
 
+    /// WKWebView routes Command-key editing shortcuts through the macOS main
+    /// menu. Without an Edit menu, typing works but paste (and the neighboring
+    /// native editing commands) never reach focused HTML controls.
+    #[cfg(target_os = "macos")]
+    fn install_edit_menu() {
+        use objc2::{sel, MainThreadMarker};
+        use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+        use objc2_foundation::NSString;
+
+        let mtm = MainThreadMarker::new().expect("desktop UI must run on the main thread");
+        let app = NSApplication::sharedApplication(mtm);
+        let main_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("Main Menu"));
+        let edit_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("Edit"));
+        let edit_item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &NSString::from_str("Edit"),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+
+        let command = NSEventModifierFlags::Command;
+        let commands = [
+            ("Undo", sel!(undo:), "z", command),
+            (
+                "Redo",
+                sel!(redo:),
+                "z",
+                command | NSEventModifierFlags::Shift,
+            ),
+            ("Cut", sel!(cut:), "x", command),
+            ("Copy", sel!(copy:), "c", command),
+            ("Paste", sel!(paste:), "v", command),
+            ("Select All", sel!(selectAll:), "a", command),
+        ];
+        for (title, action, key, modifiers) in commands {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    mtm.alloc(),
+                    &NSString::from_str(title),
+                    Some(action),
+                    &NSString::from_str(key),
+                )
+            };
+            item.setKeyEquivalentModifierMask(modifiers);
+            edit_menu.addItem(&item);
+        }
+
+        edit_item.setSubmenu(Some(&edit_menu));
+        main_menu.addItem(&edit_item);
+        app.setMainMenu(Some(&main_menu));
+    }
+
     fn serve_asset(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
         match asset(request.uri().path()) {
             Some((content_type, body)) => Response::builder()
@@ -103,6 +157,8 @@ mod native {
 
     pub fn run(bridge: DesktopBridge, runtime: tokio::runtime::Runtime) -> Result<()> {
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+        #[cfg(target_os = "macos")]
+        install_edit_menu();
         let proxy = event_loop.create_proxy();
         let window = WindowBuilder::new()
             .with_title("Stream")

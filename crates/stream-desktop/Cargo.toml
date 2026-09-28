@@ -27,6 +27,11 @@ open = { version = "5", optional = true }
 tao = { version = "0.37", optional = true }
 wry = { version = "0.57", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder", "NSView"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+
 [dev-dependencies]
 reqwest.workspace = true
 stream-testkit = { path = "../stream-testkit" }
